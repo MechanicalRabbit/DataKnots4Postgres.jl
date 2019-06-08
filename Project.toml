@@ -1,0 +1,24 @@
+name = "DataKnots4Postgres"
+uuid = "ee1fa34a-8a34-11e9-034b-7bfccbfac8bd"
+authors = ["Kirill Simonov <xi@resolvent.net>", "Clark C. Evans <cce@clarkevans.com"]
+version = "0.1.0"
+
+[deps]
+DataKnots = "f3f2b2ad-91c8-5588-b964-d77e2d3bb090"
+LibPQ = "194296ae-ab2e-5f79-8cd4-7183a0a5a0d1"
+PostgresCatalog = "972fa324-5b21-11e9-38b2-934e41d705ec"
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+
+[compat]
+DataKnots = "0.9.0"
+LibPQ = "0.9.0"
+PostgresCatalog = "0.1.0"
+Tables = "0.2.0"
+julia = "1"
+
+[extras]
+Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
+NarrativeTest = "9563631e-acd4-5dd8-bebb-4cf36518960d"
+
+[targets]
+test = ["Coverage", "NarrativeTest"]
