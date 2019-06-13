@@ -31,5 +31,8 @@
     using DataKnots, DataKnots4Postgres
 
     db = DataKnot(conn)
-    #-> ERROR: not implemented
+    #=>
+    ┼─────────── … ──┼
+    │ DATABASE " … " │
+    =#
 
