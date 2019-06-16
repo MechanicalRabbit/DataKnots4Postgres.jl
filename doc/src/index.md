@@ -23,9 +23,9 @@
             );
 
             INSERT INTO patient (id, mrn, sex, mother_id, father_id) VALUES
-                (1, '99f93d58-e51c-45c0-8bee-f44c6df5a957', 'female', NULL, NULL),
-                (2, '28ac2156-b841-4e0f-9416-1d8f3fccbd8e', 'male', NULL, NULL),
-                (3, 'dc6194b7-2cc6-4d34-acb3-0325b0683a0e', 'male', 1, 2);
+                (1, '99f93d58', 'female', NULL, NULL),
+                (2, '28ac2156', 'male', NULL, NULL),
+                (3, 'dc6194b7', 'male', 1, 2);
             """)
 
     using DataKnots, DataKnots4Postgres
@@ -34,5 +34,63 @@
     #=>
     ┼─────────── … ──┼
     │ DATABASE " … " │
+    =#
+
+    @query db patient
+    #=>
+      │ patient                                    │
+      │ id  mrn       sex     mother_id  father_id │
+    ──┼────────────────────────────────────────────┼
+    1 │  1  99f93d58  female                       │
+    2 │  2  28ac2156  male                         │
+    3 │  3  dc6194b7  male            1          2 │
+    =#
+
+    @query db patient{mrn, sex}
+    #=>
+      │ patient          │
+      │ mrn       sex    │
+    ──┼──────────────────┼
+    1 │ 99f93d58  female │
+    2 │ 28ac2156  male   │
+    3 │ dc6194b7  male   │
+    =#
+
+    @query db patient.filter(sex=="female")
+    #=>
+      │ patient                                    │
+      │ id  mrn       sex     mother_id  father_id │
+    ──┼────────────────────────────────────────────┼
+    1 │  1  99f93d58  female                       │
+    =#
+
+    @query db count(patient)
+    #=>
+    ┼───┼
+    │ 3 │
+    =#
+
+    @query db patient.group(sex){sex, size => count(patient)}
+    #=>
+      │ sex     size │
+    ──┼──────────────┼
+    1 │ female     1 │
+    2 │ male       2 │
+    =#
+
+    @query db begin
+        patient
+        keep(p => it)
+        join(mother => patient.filter(id == p.mother_id).is0to1())
+        join(father => patient.filter(id == p.father_id).is0to1())
+        {mrn, sex, mother => mother.mrn, father => father.mrn}
+    end
+    #=>
+      │ patient                              │
+      │ mrn       sex     mother    father   │
+    ──┼──────────────────────────────────────┼
+    1 │ 99f93d58  female                     │
+    2 │ 28ac2156  male                       │
+    3 │ dc6194b7  male    99f93d58  28ac2156 │
     =#
 
