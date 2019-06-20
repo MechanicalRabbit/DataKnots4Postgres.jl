@@ -14,8 +14,14 @@ import DataKnots:
     TupleOf,
     TupleVector,
     ValueOf,
+    as_tuples,
+    block_cardinality,
+    chain_of,
+    column,
+    cover,
     designate,
     fits,
+    flatten,
     lookup,
     quoteof,
     quoteof_inner,
@@ -23,6 +29,7 @@ import DataKnots:
     shapeof,
     syntaxof,
     target,
+    with_elements,
     x1to1
 
 using Tables
@@ -128,6 +135,11 @@ render_cell(shp::EntityShape, vals::VectorWithHandle, idx::Int, avail::Int, dept
         render_cell(output(shp), output(vals), idx, avail, depth)
     end
 
+output() = Pipeline(output)
+
+output(::Runtime, input) =
+    output(input)
+
 postgres_name(name::AbstractString) =
     "\"$(replace(name, "\"" => "\"\""))\""
 
@@ -140,10 +152,13 @@ postgres_name(names::AbstractVector) =
 postgres_name(name::Integer) =
     "\$$name"
 
-load_postgres_table(tbl_name, col_names, col_types, icol_names, icol_types) =
-    Pipeline(load_postgres_table, tbl_name, col_names, col_types, icol_names, icol_types)
+load_postgres_table(tbl_name, col_names, col_types) =
+    Pipeline(load_postgres_table, tbl_name, col_names, col_types)
 
-function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_names, col_types, icol_names, icol_types)
+load_postgres_table(tbl_name, col_names, col_types, icol_names) =
+    Pipeline(load_postgres_table, tbl_name, col_names, col_types, icol_names)
+
+function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_names, col_types, icol_names=String[])
     @assert input isa VectorWithHandle
     sql = "SELECT $(postgres_name(col_names)) FROM $(postgres_name(tbl_name))"
     if !isempty(icol_names)
@@ -153,7 +168,7 @@ function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_nam
     end
     results = []
     for row in input
-        res = execute(handle(input).conn, sql, row)
+        res = execute(handle(input).conn, sql, values(row))
         push!(results, (length(res), columntable(res)))
     end
     offs = Vector{Int}(undef, length(results)+1)
@@ -168,8 +183,18 @@ function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_nam
             append!(cols[j], res[j])
         end
     end
-    BlockVector(offs, TupleVector(lbls, top-1, cols))
+    tv = TupleVector(lbls, top-1, cols)
+    h = handle(input)
+    ety = h.ety
+    ety′ = get_catalog(ety)[tbl_name[1]][tbl_name[2]]
+    h′ = Handle(h.conn, ety′, h.opt)
+    hv = VectorWithHandle(h′, tv)
+    BlockVector(offs, hv)
 end
+
+get_catalog(cat::PGCatalog) = cat
+
+get_catalog(tbl::PGTable) = tbl.schema.catalog
 
 function get_type(col::PGColumn)
     T = get_type(col.type)
@@ -193,26 +218,48 @@ function get_type(typ::PGType)
     String
 end
 
-function lookup(shp::EntityShape{PGCatalog}, name::Symbol)
-    p = lookup(EntityShape(shp.ety["public"], shp.opt, shp.out), name)
+function lookup(src::EntityShape{PGCatalog}, name::Symbol)
+    p = lookup(EntityShape(src.ety["public"], src.opt, src.out), name)
     p !== nothing || return p
-    p |> designate(shp, target(p))
+    p |> designate(src, target(p))
 end
 
-function lookup(shp::EntityShape{PGSchema}, name::Symbol)
-    scm = shp.ety
+function lookup(src::EntityShape{PGSchema}, name::Symbol)
+    scm = src.ety
     tbl = get(scm, string(name), nothing)
     tbl !== nothing || return nothing
+    @assert tbl.primary_key !== nothing
     tbl_name = (tbl.schema.name, tbl.name)
-    col_names = [col.name for col in tbl]
-    col_types = Type[get_type(col) for col in tbl]
-    icol_names = String[]
-    icol_types = Type[]
-    p = load_postgres_table(tbl_name, col_names, col_types, icol_names, icol_types)
-    p |> designate(shp, BlockOf(TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name))
+    col_names = [col.name for col in tbl.primary_key.columns]
+    col_types = Type[get_type(col) for col in tbl.primary_key.columns]
+    p = load_postgres_table(tbl_name, col_names, col_types)
+    tgt = EntityShape(tbl, src.opt, TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name) |> BlockOf
+    p |> designate(src, tgt)
 end
 
-lookup(shp::EntityShape, name::Symbol) =
+function lookup(src::EntityShape{PGTable}, name::Symbol)
+    tbl = src.ety
+    for col in tbl
+        if col.name == string(name)
+            col_type = get_type(col)
+            tbl_name = (tbl.schema.name, tbl.name)
+            col_names = [col.name]
+            col_types = Type[col_type]
+            icol_names = [col.name for col in tbl.primary_key.columns]
+            c = cover(ValueOf(col_type) |> IsLabeled(name))
+            p = chain_of(
+                    load_postgres_table(tbl_name, col_names, col_types, icol_names),
+                    block_cardinality(x1to1),
+                    with_elements(chain_of(output(), column(1), c)),
+                    flatten(),
+            ) |> designate(src, target(c))
+            return p
+        end
+    end
+    nothing
+end
+
+lookup(rc::EntityShape, name::Symbol) =
     error("not implemented")
 
 end

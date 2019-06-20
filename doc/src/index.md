@@ -16,8 +16,8 @@
                 sex patient_sex_enum NOT NULL DEFAULT 'unknown',
                 mother_id int4,
                 father_id int4,
-                CONSTRAINT patient_uk UNIQUE (id),
-                CONSTRAINT patient_pk PRIMARY KEY (mrn),
+                CONSTRAINT patient_pk PRIMARY KEY (id),
+                CONSTRAINT patient_mrn_uk UNIQUE (mrn),
                 CONSTRAINT patient_mother_fk FOREIGN KEY (mother_id) REFERENCES patient (id),
                 CONSTRAINT patient_father_fk FOREIGN KEY (father_id) REFERENCES patient (id)
             );
@@ -38,12 +38,11 @@
 
     @query db patient
     #=>
-      │ patient                                    │
-      │ id  mrn       sex     mother_id  father_id │
-    ──┼────────────────────────────────────────────┼
-    1 │  1  99f93d58  female                       │
-    2 │  2  28ac2156  male                         │
-    3 │  3  dc6194b7  male            1          2 │
+      │ patient │
+    ──┼─────────┼
+    1 │ 1       │
+    2 │ 2       │
+    3 │ 3       │
     =#
 
     @query db patient{mrn, sex}
@@ -58,10 +57,9 @@
 
     @query db patient.filter(sex=="female")
     #=>
-      │ patient                                    │
-      │ id  mrn       sex     mother_id  father_id │
-    ──┼────────────────────────────────────────────┼
-    1 │  1  99f93d58  female                       │
+      │ patient │
+    ──┼─────────┼
+    1 │ 1       │
     =#
 
     @query db count(patient)
@@ -86,11 +84,7 @@
         {mrn, sex, mother => mother.mrn, father => father.mrn}
     end
     #=>
-      │ patient                              │
-      │ mrn       sex     mother    father   │
-    ──┼──────────────────────────────────────┼
-    1 │ 99f93d58  female                     │
-    2 │ 28ac2156  male                       │
-    3 │ dc6194b7  male    99f93d58  28ac2156 │
+    ERROR: expected a record; got
+    TABLE "patient"
     =#
 
