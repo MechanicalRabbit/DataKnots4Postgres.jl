@@ -83,13 +83,19 @@
     @query db begin
         patient
         keep(p => it)
+        {mrn, sex}
         join(mother => patient.filter(id == p.mother_id).is0to1())
         join(father => patient.filter(id == p.father_id).is0to1())
         {mrn, sex, mother => mother.mrn, father => father.mrn}
     end
     #=>
-    ERROR: expected a record; got
-    TABLE "patient"
+      │ patient                              │
+      │ mrn       sex     mother    father   │
+    ──┼──────────────────────────────────────┼
+    1 │ 99f93d58  female                     │
+    2 │ 28ac2156  male                       │
+    3 │ dc6194b7  male    99f93d58  28ac2156 │
+    4 │ 3126ce41  female  99f93d58  28ac2156 │
     =#
 
     @query db begin
