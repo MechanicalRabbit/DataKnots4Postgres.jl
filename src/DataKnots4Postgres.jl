@@ -30,7 +30,9 @@ import DataKnots:
     syntaxof,
     target,
     with_elements,
-    x1to1
+    x0to1,
+    x1to1,
+    x1toN
 
 using Tables
 
@@ -43,6 +45,7 @@ using LibPQ:
 using PostgresCatalog:
     PGCatalog,
     PGColumn,
+    PGForeignKey,
     PGSchema,
     PGTable,
     PGType,
@@ -218,6 +221,9 @@ function get_type(typ::PGType)
     String
 end
 
+guess_name(fk::PGForeignKey) =
+    fk.name
+
 function lookup(src::EntityShape{PGCatalog}, name::Symbol)
     p = lookup(EntityShape(src.ety["public"], src.opt, src.out), name)
     p !== nothing || return p
@@ -247,19 +253,48 @@ function lookup(src::EntityShape{PGTable}, name::Symbol)
             col_types = Type[col_type]
             icol_names = [col.name for col in tbl.primary_key.columns]
             c = cover(ValueOf(col_type) |> IsLabeled(name))
-            p = chain_of(
+            return chain_of(
                     load_postgres_table(tbl_name, col_names, col_types, icol_names),
                     block_cardinality(x1to1),
                     with_elements(chain_of(output(), column(1), c)),
                     flatten(),
             ) |> designate(src, target(c))
-            return p
+        end
+    end
+    for fk in tbl.foreign_keys
+        if guess_name(fk) == string(name)
+            ttbl = fk.target_table
+            @assert ttbl.primary_key !== nothing
+            tbl_name = (tbl.schema.name, tbl.name)
+            col_names = [col.name for col in fk.columns]
+            col_types = Type[get_type(col) for col in fk.columns]
+            icol_names = [col.name for col in tbl.primary_key.columns]
+            p0 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            tbl_name = (ttbl.schema.name, ttbl.name)
+            col_names = [col.name for col in ttbl.primary_key.columns]
+            col_types = Type[get_type(col) for col in ttbl.primary_key.columns]
+            icol_names = [col.name for col in fk.target_columns]
+            p1 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            card = x1to1
+            if any(col -> !col.not_null, fk.columns)
+                card |= x0to1
+            end
+            if !any(uk -> uk.columns == fk.columns, tbl.unique_keys)
+                card |= x1toN
+            end
+            tgt = BlockOf(EntityShape(ttbl, src.opt, TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name), card)
+            return chain_of(
+                    p0,
+                    block_cardinality(x1to1),
+                    with_elements(chain_of(p1, block_cardinality(card))),
+                    flatten(),
+            ) |> designate(src, tgt)
         end
     end
     nothing
 end
 
-lookup(rc::EntityShape, name::Symbol) =
+lookup(src::EntityShape, name::Symbol) =
     error("not implemented")
 
 end

@@ -25,7 +25,9 @@
             INSERT INTO patient (id, mrn, sex, mother_id, father_id) VALUES
                 (1, '99f93d58', 'female', NULL, NULL),
                 (2, '28ac2156', 'male', NULL, NULL),
-                (3, 'dc6194b7', 'male', 1, 2);
+                (3, 'dc6194b7', 'male', 1, 2),
+                (4, '3126ce41', 'male', 1, 2),
+                (5, 'cdcbf9a9', 'female', 1, 2);
             """)
 
     using DataKnots, DataKnots4Postgres
@@ -43,6 +45,8 @@
     1 │ 1       │
     2 │ 2       │
     3 │ 3       │
+    4 │ 4       │
+    5 │ 5       │
     =#
 
     @query db patient{mrn, sex}
@@ -53,6 +57,8 @@
     1 │ 99f93d58  female │
     2 │ 28ac2156  male   │
     3 │ dc6194b7  male   │
+    4 │ 3126ce41  male   │
+    5 │ cdcbf9a9  female │
     =#
 
     @query db patient.filter(sex=="female")
@@ -60,20 +66,21 @@
       │ patient │
     ──┼─────────┼
     1 │ 1       │
+    2 │ 5       │
     =#
 
     @query db count(patient)
     #=>
     ┼───┼
-    │ 3 │
+    │ 5 │
     =#
 
     @query db patient.group(sex){sex, size => count(patient)}
     #=>
       │ sex     size │
     ──┼──────────────┼
-    1 │ female     1 │
-    2 │ male       2 │
+    1 │ female     2 │
+    2 │ male       3 │
     =#
 
     @query db begin
@@ -86,5 +93,20 @@
     #=>
     ERROR: expected a record; got
     TABLE "patient"
+    =#
+
+    @query db begin
+        patient
+        {mrn, mother => patient_mother_fk.mrn, father => patient_father_fk.mrn}
+    end
+    #=>
+      │ patient                      │
+      │ mrn       mother    father   │
+    ──┼──────────────────────────────┼
+    1 │ 99f93d58                     │
+    2 │ 28ac2156                     │
+    3 │ dc6194b7  99f93d58  28ac2156 │
+    4 │ 3126ce41  99f93d58  28ac2156 │
+    5 │ cdcbf9a9  99f93d58  28ac2156 │
     =#
 
