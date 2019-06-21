@@ -224,6 +224,9 @@ end
 guess_name(fk::PGForeignKey) =
     fk.name
 
+guess_referring_name(fk::PGForeignKey) =
+    "$(fk.table.name)_via_$(fk.name)"
+
 function lookup(src::EntityShape{PGCatalog}, name::Symbol)
     p = lookup(EntityShape(src.ety["public"], src.opt, src.out), name)
     p !== nothing || return p
@@ -279,7 +282,31 @@ function lookup(src::EntityShape{PGTable}, name::Symbol)
             if any(col -> !col.not_null, fk.columns)
                 card |= x0to1
             end
-            if !any(uk -> uk.columns == fk.columns, tbl.unique_keys)
+            tgt = BlockOf(EntityShape(ttbl, src.opt, TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name), card)
+            return chain_of(
+                    p0,
+                    block_cardinality(x1to1),
+                    with_elements(chain_of(p1, block_cardinality(card))),
+                    flatten(),
+            ) |> designate(src, tgt)
+        end
+    end
+    for fk in tbl.referring_foreign_keys
+        if guess_referring_name(fk) == string(name)
+            ttbl = fk.table
+            @assert ttbl.primary_key !== nothing
+            tbl_name = (tbl.schema.name, tbl.name)
+            col_names = [col.name for col in fk.target_columns]
+            col_types = Type[get_type(col) for col in fk.target_columns]
+            icol_names = [col.name for col in tbl.primary_key.columns]
+            p0 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            tbl_name = (ttbl.schema.name, ttbl.name)
+            col_names = [col.name for col in ttbl.primary_key.columns]
+            col_types = Type[get_type(col) for col in ttbl.primary_key.columns]
+            icol_names = [col.name for col in fk.columns]
+            p1 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            card = x0to1
+            if !any(uk -> uk.columns == fk.columns, ttbl.unique_keys)
                 card |= x1toN
             end
             tgt = BlockOf(EntityShape(ttbl, src.opt, TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name), card)

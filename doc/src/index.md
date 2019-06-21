@@ -26,8 +26,7 @@
                 (1, '99f93d58', 'female', NULL, NULL),
                 (2, '28ac2156', 'male', NULL, NULL),
                 (3, 'dc6194b7', 'male', 1, 2),
-                (4, '3126ce41', 'male', 1, 2),
-                (5, 'cdcbf9a9', 'female', 1, 2);
+                (4, '3126ce41', 'female', 1, 2);
             """)
 
     using DataKnots, DataKnots4Postgres
@@ -46,7 +45,6 @@
     2 │ 2       │
     3 │ 3       │
     4 │ 4       │
-    5 │ 5       │
     =#
 
     @query db patient{mrn, sex}
@@ -57,8 +55,7 @@
     1 │ 99f93d58  female │
     2 │ 28ac2156  male   │
     3 │ dc6194b7  male   │
-    4 │ 3126ce41  male   │
-    5 │ cdcbf9a9  female │
+    4 │ 3126ce41  female │
     =#
 
     @query db patient.filter(sex=="female")
@@ -66,13 +63,13 @@
       │ patient │
     ──┼─────────┼
     1 │ 1       │
-    2 │ 5       │
+    2 │ 4       │
     =#
 
     @query db count(patient)
     #=>
     ┼───┼
-    │ 5 │
+    │ 4 │
     =#
 
     @query db patient.group(sex){sex, size => count(patient)}
@@ -80,7 +77,7 @@
       │ sex     size │
     ──┼──────────────┼
     1 │ female     2 │
-    2 │ male       3 │
+    2 │ male       2 │
     =#
 
     @query db begin
@@ -97,16 +94,21 @@
 
     @query db begin
         patient
-        {mrn, mother => patient_mother_fk.mrn, father => patient_father_fk.mrn}
+        {
+            mrn,
+            mother => patient_mother_fk.mrn,
+            father => patient_father_fk.mrn,
+            maternal_children => patient_via_patient_mother_fk.mrn,
+            paternal_children => patient_via_patient_father_fk.mrn,
+        }
     end
     #=>
-      │ patient                      │
-      │ mrn       mother    father   │
-    ──┼──────────────────────────────┼
-    1 │ 99f93d58                     │
-    2 │ 28ac2156                     │
-    3 │ dc6194b7  99f93d58  28ac2156 │
-    4 │ 3126ce41  99f93d58  28ac2156 │
-    5 │ cdcbf9a9  99f93d58  28ac2156 │
+      │ patient                                                              │
+      │ mrn       mother    father    maternal_children   paternal_children  │
+    ──┼──────────────────────────────────────────────────────────────────────┼
+    1 │ 99f93d58                      dc6194b7; 3126ce41                     │
+    2 │ 28ac2156                                          dc6194b7; 3126ce41 │
+    3 │ dc6194b7  99f93d58  28ac2156                                         │
+    4 │ 3126ce41  99f93d58  28ac2156                                         │
     =#
 
