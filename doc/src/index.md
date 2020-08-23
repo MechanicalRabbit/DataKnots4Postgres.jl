@@ -109,12 +109,12 @@
         }
     end
     #=>
-      │ patient                                                              │
-      │ mrn       mother    father    maternal_children   paternal_children  │
-    ──┼──────────────────────────────────────────────────────────────────────┼
-    1 │ 99f93d58                      dc6194b7; 3126ce41                     │
-    2 │ 28ac2156                                          dc6194b7; 3126ce41 │
-    3 │ dc6194b7  99f93d58  28ac2156                                         │
-    4 │ 3126ce41  99f93d58  28ac2156                                         │
+      │ patient                                                           │
+      │ mrn       mother    father    maternal_children  paternal_childre…│
+    ──┼───────────────────────────────────────────────────────────────────┼
+    1 │ 99f93d58                      dc6194b7; 3126ce4…                  │
+    2 │ 28ac2156                                         dc6194b7; 3126ce…│
+    3 │ dc6194b7  99f93d58  28ac2156                                      │
+    4 │ 3126ce41  99f93d58  28ac2156                                      │
     =#
 
