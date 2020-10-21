@@ -7,8 +7,11 @@ import DataKnots:
     BlockVector,
     DataKnot,
     DataShape,
+    HasSlots,
     IsLabeled,
     Pipeline,
+    Signature,
+    SlotShape,
     Runtime,
     TableCell,
     TupleOf,
@@ -16,6 +19,7 @@ import DataKnots:
     ValueOf,
     as_tuples,
     block_cardinality,
+    branch,
     chain_of,
     column,
     cover,
@@ -26,9 +30,11 @@ import DataKnots:
     quoteof,
     quoteof_inner,
     render_cell,
+    replace_branch,
     shapeof,
     syntaxof,
     target,
+    width,
     with_elements,
     x0to1,
     x1to1,
@@ -113,6 +119,16 @@ output(shp::EntityShape) = shp.out
 replace_output(shp::EntityShape, f) =
     EntityShape(shp.ety, shp.opt, f isa AbstractShape ? f : f(shp.out))
 
+width(::EntityShape) = 1
+
+branch(shp::EntityShape, j) =
+    (checkbounds(1:1, j); shp.out)
+
+function replace_branch(shp::EntityShape, j::Int, f)
+    checkbounds(1:1, j)
+    replace_output(shp, f)
+end
+
 Base.eltype(shp::EntityShape) =
     eltype(shp.out)
 
@@ -142,6 +158,13 @@ output() = Pipeline(output)
 
 output(::Runtime, input) =
     output(input)
+
+function output(rt::Runtime, @nospecialize(shp::AbstractShape))
+    @assert shp isa EntityShape
+    Signature(EntityShape(entity(shp), options(shp), SlotShape()) |> HasSlots,
+              SlotShape(),
+              1, [1])
+end
 
 postgres_name(name::AbstractString) =
     "\"$(replace(name, "\"" => "\"\""))\""
@@ -193,6 +216,18 @@ function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_nam
     h′ = Handle(h.conn, ety′, h.opt)
     hv = VectorWithHandle(h′, tv)
     BlockVector(offs, hv)
+end
+
+function load_postgres_table(::Runtime, src::AbstractShape, tbl_name, col_names, col_types, icol_names=String[])
+    @assert src isa EntityShape
+    ety = entity(src)
+    opt = options(src)
+    out = output(src)
+    @assert out isa TupleOf && width(out) == length(icol_names)
+    ety′ = get_catalog(ety)[tbl_name[1]][tbl_name[2]]
+    out′ = TupleOf(Symbol[Symbol(col_name) for col_name in col_names],
+                   AbstractShape[ValueOf(col_type) for col_type in col_types])
+    Signature(src, BlockOf(EntityShape(ety′, opt, out′)))
 end
 
 get_catalog(cat::PGCatalog) = cat
