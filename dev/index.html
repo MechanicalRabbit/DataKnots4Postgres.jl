@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Home · DataKnots4Postgres.jl</title><link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/4.2.0/normalize.min.css" rel="stylesheet" type="text/css"/><link href="https://fonts.googleapis.com/css?family=Lato|Roboto+Mono" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/default.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.2.0/require.min.js" data-main="assets/documenter.js"></script><script src="siteinfo.js"></script><script src="../versions.js"></script><link href="assets/documenter.css" rel="stylesheet" type="text/css"/></head><body><nav class="toc"><h1>DataKnots4Postgres.jl</h1><select id="version-selector" onChange="window.location.href=this.value" style="visibility: hidden"></select><form class="search" id="search-form" action="search/"><input id="search-query" name="q" type="text" placeholder="Search docs"/></form><ul><li class="current"><a class="toctext" href>Home</a><ul class="internal"></ul></li></ul></nav><article id="docs"><header><nav><ul><li><a href>Home</a></li></ul><a class="edit-page" href="https://github.com/rbt-lang/DataKnots4Postgres.jl/blob/master/doc/src/index.md"><span class="fa"></span> Edit on GitHub</a></nav><hr/><div id="topbar"><span>Home</span><a class="fa fa-bars" href="#"></a></div></header><h1><a class="nav-anchor" id="DataKnots4Postgres.jl-1" href="#DataKnots4Postgres.jl-1">DataKnots4Postgres.jl</a></h1><pre><code class="language-julia">using LibPQ
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Home · DataKnots4Postgres.jl</title><link href="https://fonts.googleapis.com/css?family=Lato|Roboto+Mono" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.0/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.0/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.0/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.11.1/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="assets/documenter.js"></script><script src="siteinfo.js"></script><script src="../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-dark.css" data-theme-name="documenter-dark"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit">DataKnots4Postgres.jl</span></div><form class="docs-search" action="search/"><input class="docs-search-query" id="documenter-search-query" name="q" type="text" placeholder="Search docs"/></form><ul class="docs-menu"><li class="is-active"><a class="tocitem" href>Home</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Home</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Home</a></li></ul></nav><div class="docs-right"><a class="docs-edit-link" href="https://github.com/rbt-lang/DataKnots4Postgres.jl/blob/master/doc/src/index.md" title="Edit on GitHub"><span class="docs-icon fab"></span><span class="docs-label is-hidden-touch">Edit on GitHub</span></a><a class="docs-settings-button fas fa-cog" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-sidebar-button fa fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a></div></header><article class="content" id="documenter-page"><h1 id="DataKnots4Postgres.jl"><a class="docs-heading-anchor" href="#DataKnots4Postgres.jl">DataKnots4Postgres.jl</a><a id="DataKnots4Postgres.jl-1"></a><a class="docs-heading-anchor-permalink" href="#DataKnots4Postgres.jl" title="Permalink"></a></h1><pre><code class="language-julia">using LibPQ
 
 conn = LibPQ.Connection(&quot;&quot;)
 
@@ -15,16 +15,17 @@ execute(conn,
             sex patient_sex_enum NOT NULL DEFAULT &#39;unknown&#39;,
             mother_id int4,
             father_id int4,
-            CONSTRAINT patient_uk UNIQUE (id),
-            CONSTRAINT patient_pk PRIMARY KEY (mrn),
+            CONSTRAINT patient_pk PRIMARY KEY (id),
+            CONSTRAINT patient_mrn_uk UNIQUE (mrn),
             CONSTRAINT patient_mother_fk FOREIGN KEY (mother_id) REFERENCES patient (id),
             CONSTRAINT patient_father_fk FOREIGN KEY (father_id) REFERENCES patient (id)
         );
 
         INSERT INTO patient (id, mrn, sex, mother_id, father_id) VALUES
-            (1, &#39;99f93d58-e51c-45c0-8bee-f44c6df5a957&#39;, &#39;female&#39;, NULL, NULL),
-            (2, &#39;28ac2156-b841-4e0f-9416-1d8f3fccbd8e&#39;, &#39;male&#39;, NULL, NULL),
-            (3, &#39;dc6194b7-2cc6-4d34-acb3-0325b0683a0e&#39;, &#39;male&#39;, 1, 2);
+            (1, &#39;99f93d58&#39;, &#39;female&#39;, NULL, NULL),
+            (2, &#39;28ac2156&#39;, &#39;male&#39;, NULL, NULL),
+            (3, &#39;dc6194b7&#39;, &#39;male&#39;, 1, 2),
+            (4, &#39;3126ce41&#39;, &#39;female&#39;, 1, 2);
         &quot;&quot;&quot;)
 
 using DataKnots, DataKnots4Postgres
@@ -33,4 +34,85 @@ db = DataKnot(conn)
 #=&gt;
 ┼─────────── … ──┼
 │ DATABASE &quot; … &quot; │
-=#</code></pre><footer><hr/></footer></article></body></html>
+=#
+
+@query db patient
+#=&gt;
+  │ patient │
+──┼─────────┼
+1 │ 1       │
+2 │ 2       │
+3 │ 3       │
+4 │ 4       │
+=#
+
+@query db patient{mrn, sex}
+#=&gt;
+  │ patient          │
+  │ mrn       sex    │
+──┼──────────────────┼
+1 │ 99f93d58  female │
+2 │ 28ac2156  male   │
+3 │ dc6194b7  male   │
+4 │ 3126ce41  female │
+=#
+
+@query db patient.filter(sex==&quot;female&quot;)
+#=&gt;
+  │ patient │
+──┼─────────┼
+1 │ 1       │
+2 │ 4       │
+=#
+
+@query db count(patient)
+#=&gt;
+┼───┼
+│ 4 │
+=#
+
+@query db patient.group(sex){sex, size =&gt; count(patient)}
+#=&gt;
+  │ sex     size │
+──┼──────────────┼
+1 │ female     2 │
+2 │ male       2 │
+=#
+
+@query db begin
+    patient
+    keep(p =&gt; it)
+    {mrn, sex}
+    join(mother =&gt; patient.filter(id == p.mother_id).is0to1())
+    join(father =&gt; patient.filter(id == p.father_id).is0to1())
+    {mrn, sex, mother =&gt; mother.mrn, father =&gt; father.mrn}
+end
+#=&gt;
+  │ patient                              │
+  │ mrn       sex     mother    father   │
+──┼──────────────────────────────────────┼
+1 │ 99f93d58  female                     │
+2 │ 28ac2156  male                       │
+3 │ dc6194b7  male    99f93d58  28ac2156 │
+4 │ 3126ce41  female  99f93d58  28ac2156 │
+=#
+
+@query db begin
+    patient
+    {
+        mrn,
+        mother =&gt; patient_mother_fk.mrn,
+        father =&gt; patient_father_fk.mrn,
+        maternal_children =&gt; patient_via_patient_mother_fk.mrn,
+        paternal_children =&gt; patient_via_patient_father_fk.mrn,
+    }
+end
+#=&gt;
+  │ patient                                                           │
+  │ mrn       mother    father    maternal_children  paternal_childre…│
+──┼───────────────────────────────────────────────────────────────────┼
+1 │ 99f93d58                      dc6194b7; 3126ce4…                  │
+2 │ 28ac2156                                         dc6194b7; 3126ce…│
+3 │ dc6194b7  99f93d58  28ac2156                                      │
+4 │ 3126ce41  99f93d58  28ac2156                                      │
+=#</code></pre></article><nav class="docs-footer"><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> on <span class="colophon-date" title="Thursday 10 December 2020 04:12">Thursday 10 December 2020</span>. Using Julia version 1.5.3.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
