@@ -23,10 +23,10 @@
             );
 
             INSERT INTO patient (id, mrn, sex, mother_id, father_id) VALUES
-                (1, '99f93d58', 'female', NULL, NULL),
-                (2, '28ac2156', 'male', NULL, NULL),
-                (3, 'dc6194b7', 'male', 1, 2),
-                (4, '3126ce41', 'female', 1, 2);
+                (1001, '99f93d58', 'female', NULL, NULL),
+                (1002, '28ac2156', 'male', NULL, NULL),
+                (1003, 'dc6194b7', 'male', 1001, 1002),
+                (1004, '3126ce41', 'female', 1001, 1002);
             """)
 
     using DataKnots, DataKnots4Postgres
@@ -41,10 +41,10 @@
     #=>
       │ patient │
     ──┼─────────┼
-    1 │ 1       │
-    2 │ 2       │
-    3 │ 3       │
-    4 │ 4       │
+    1 │ 1001    │
+    2 │ 1002    │
+    3 │ 1003    │
+    4 │ 1004    │
     =#
 
     @query db patient{mrn, sex}
@@ -62,8 +62,8 @@
     #=>
       │ patient │
     ──┼─────────┼
-    1 │ 1       │
-    2 │ 4       │
+    1 │ 1001    │
+    2 │ 1004    │
     =#
 
     @query db count(patient)
