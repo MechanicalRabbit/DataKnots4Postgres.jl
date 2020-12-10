@@ -5,11 +5,11 @@ Postgres databases.*
 
 **Documentation** | **Build Status** | **Process**
 :---: | :---: | :---:
-[![Stable Documentation][doc-rel-img]][doc-rel-url] [![Development Documentation][doc-dev-img]][doc-dev-url] | [![Linux Build Status][travis-img]][travis-url] [![Code Coverage Status][codecov-img]][codecov-url] | [![Chat on Gitter][gitter-img]][gitter-url] [![Open Issues][issues-img]][issues-url] [![MIT License][license-img]][license-url]
+[![Stable Documentation][doc-rel-img]][doc-rel-url] [![Development Documentation][doc-dev-img]][doc-dev-url] | [![Build Status][ci-img]][ci-url] [![Code Coverage Status][codecov-img]][codecov-url] | [![Chat on Gitter][gitter-img]][gitter-url] [![Open Issues][issues-img]][issues-url] [![MIT License][license-img]][license-url]
 
 
-[travis-img]: https://travis-ci.org/rbt-lang/DataKnots4Postgres.jl.svg?branch=master
-[travis-url]: https://travis-ci.org/rbt-lang/DataKnots4Postgres.jl
+[ci-img]: https://github.com/rbt-lang/DataKnots4Postgres.jl/workflows/CI/badge.svg
+[ci-url]: https://github.com/rbt-lang/DataKnots4Postgres.jl/actions?query=workflow%3ACI+branch%3Amaster
 [codecov-img]: https://codecov.io/gh/rbt-lang/DataKnots4Postgres.jl/branch/master/graph/badge.svg
 [codecov-url]: https://codecov.io/gh/rbt-lang/DataKnots4Postgres.jl
 [issues-img]: https://img.shields.io/github/issues/rbt-lang/DataKnots4Postgres.jl.svg
