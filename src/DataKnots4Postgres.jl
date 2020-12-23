@@ -31,14 +31,15 @@ import DataKnots:
     flatten,
     head_node,
     lookup,
-    merge_into!,
     part_node,
     pipe_node,
     quoteof,
     quoteof_inner,
     render_cell,
     replace_branch,
+    rewrite!,
     rewrite_passes,
+    rewrite_simplify!,
     signature,
     shapeof,
     slot_node,
@@ -375,6 +376,7 @@ lookup(src::EntityShape, name::Symbol) =
 rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
     Pair{Int,Function}[
         2 => rewrite_pushdown!,
+        3 => rewrite_simplify!,
     ]
 
 function rewrite_pushdown!(node::DataNode)
@@ -413,6 +415,7 @@ function rewrite_pushdown!(node::DataNode)
                 end
             end
             length(other_cols) == 1 || return
+            repl = Pair{DataNode,DataNode}[]
             other_col_name, other_col_type = other_cols[1]
             sig = signature(p)
             tgt = target(sig)
@@ -420,15 +423,15 @@ function rewrite_pushdown!(node::DataNode)
             tgt′ = BlockOf(EntityShape(entity(elements(tgt)), options(elements(tgt)), out′))
             p′ = load_postgres_table(table_name, String[other_col_name], Type[other_col_type]) |> designate(source(sig), tgt′)
             node′ = pipe_node(p′, input)
-            for (n1, idx1) in copy(node.uses)
+            for (n1, idx1) in node.uses
                 if (n1 ~ head_node(_))
                     n1′ = head_node(node′)
-                    merge_into!(n1, n1′)
+                    push!(repl, n1 => n1′)
                 elseif (n1 ~ part_node(_, _))
                     n1′ = part_node(node′, 1)
-                    for (n2, idx2) in copy(n1.uses)
+                    for (n2, idx2) in n1.uses
                         if (n2 ~ pipe_node(load_postgres_table(_, _, _, _), _))
-                            for (n3, idx3) in copy(n2.uses)
+                            for (n3, idx3) in n2.uses
                                 if (n3 ~ head_node(_))
                                     for (n4, idx4) in n3.uses
                                         if (n4 ~ pipe_node(block_cardinality(card), _))
@@ -437,13 +440,13 @@ function rewrite_pushdown!(node::DataNode)
                                                               1, [1])
                                             p4′ = wrap() |> designate(sig4′)
                                             n4′ = pipe_node(p4′, slot_node(n1′))
-                                            merge_into!(n4, n4′)
+                                            push!(repl, n4 => n4′)
                                         else
                                             error()
                                         end
                                      end
                                 elseif (n3 ~ part_node(_, _))
-                                    merge_into!(n3, n1′)
+                                    push!(repl, n3 => n1′)
                                 else
                                     error()
                                 end
@@ -456,6 +459,7 @@ function rewrite_pushdown!(node::DataNode)
                     error()
                 end
             end
+            rewrite!(repl)
         end
     end
 end
