@@ -6,6 +6,7 @@ import DataKnots:
     BlockOf,
     BlockVector,
     DataKnot,
+    DataNode,
     DataShape,
     HasSlots,
     IsLabeled,
@@ -18,27 +19,39 @@ import DataKnots:
     TupleVector,
     ValueOf,
     as_tuples,
+    backward_pass,
     block_cardinality,
     branch,
     chain_of,
     column,
     cover,
     designate,
+    elements,
     fits,
     flatten,
+    head_node,
     lookup,
+    merge_into!,
+    part_node,
+    pipe_node,
     quoteof,
     quoteof_inner,
     render_cell,
     replace_branch,
+    rewrite_passes,
+    signature,
     shapeof,
+    slot_node,
+    source,
     syntaxof,
     target,
     width,
     with_elements,
+    wrap,
     x0to1,
     x1to1,
-    x1toN
+    x1toN,
+    @match_node
 
 using Tables
 
@@ -358,5 +371,93 @@ end
 
 lookup(src::EntityShape, name::Symbol) =
     error("not implemented")
+
+rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
+    Pair{Int,Function}[
+        2 => rewrite_pushdown!,
+    ]
+
+function rewrite_pushdown!(node::DataNode)
+    backward_pass(node) do node
+        @match_node if (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type]), input))
+            other_cols = Tuple{String,Type}[]
+            for (n1, idx1) in node.uses
+                if (n1 ~ head_node(_))
+                elseif (n1 ~ part_node(_, _))
+                    for (n2, idx2) in n1.uses
+                        if (n2 ~ pipe_node(p ~ load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
+                            if n2_table_name == table_name && n2_icol == col
+                                push!(other_cols, (n2_col, n2_col_type))
+                                for (n3, idx3) in n2.uses
+                                    if (n3 ~ head_node(_))
+                                        for (n4, idx4) in n3.uses
+                                            if (n4 ~ pipe_node(block_cardinality(card), _)) && card == x1to1
+                                            else
+                                                return
+                                            end
+                                         end
+                                    elseif (n3 ~ part_node(_, _))
+                                    else
+                                        return
+                                    end
+                                end
+                            else
+                                return
+                            end
+                        else
+                            return
+                        end
+                    end
+                else
+                    return
+                end
+            end
+            length(other_cols) == 1 || return
+            other_col_name, other_col_type = other_cols[1]
+            sig = signature(p)
+            tgt = target(sig)
+            out′ = TupleOf(Symbol[Symbol(other_col_name)], AbstractShape[ValueOf(other_col_type)])
+            tgt′ = BlockOf(EntityShape(entity(elements(tgt)), options(elements(tgt)), out′))
+            p′ = load_postgres_table(table_name, String[other_col_name], Type[other_col_type]) |> designate(source(sig), tgt′)
+            node′ = pipe_node(p′, input)
+            for (n1, idx1) in copy(node.uses)
+                if (n1 ~ head_node(_))
+                    n1′ = head_node(node′)
+                    merge_into!(n1, n1′)
+                elseif (n1 ~ part_node(_, _))
+                    n1′ = part_node(node′, 1)
+                    for (n2, idx2) in copy(n1.uses)
+                        if (n2 ~ pipe_node(load_postgres_table(_, _, _, _), _))
+                            for (n3, idx3) in copy(n2.uses)
+                                if (n3 ~ head_node(_))
+                                    for (n4, idx4) in n3.uses
+                                        if (n4 ~ pipe_node(block_cardinality(card), _))
+                                            sig4′ = Signature(SlotShape(),
+                                                              BlockOf(SlotShape(), x1to1) |> HasSlots,
+                                                              1, [1])
+                                            p4′ = wrap() |> designate(sig4′)
+                                            n4′ = pipe_node(p4′, slot_node(n1′))
+                                            merge_into!(n4, n4′)
+                                        else
+                                            error()
+                                        end
+                                     end
+                                elseif (n3 ~ part_node(_, _))
+                                    merge_into!(n3, n1′)
+                                else
+                                    error()
+                                end
+                            end
+                        else
+                            error()
+                        end
+                    end
+                else
+                    error()
+                end
+            end
+        end
+    end
+end
 
 end
