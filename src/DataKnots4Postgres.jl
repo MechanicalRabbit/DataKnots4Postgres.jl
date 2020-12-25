@@ -27,9 +27,11 @@ import DataKnots:
     cover,
     designate,
     elements,
+    fill_node,
     fits,
     flatten,
     head_node,
+    join_node,
     lookup,
     part_node,
     pipe_node,
@@ -46,7 +48,9 @@ import DataKnots:
     source,
     syntaxof,
     target,
+    tuple_of,
     width,
+    with_branch,
     with_elements,
     wrap,
     x0to1,
@@ -178,6 +182,37 @@ function output(rt::Runtime, @nospecialize(shp::AbstractShape))
     Signature(EntityShape(entity(shp), options(shp), SlotShape()) |> HasSlots,
               SlotShape(),
               1, [1])
+end
+
+with_output(p) = Pipeline(with_output, p)
+
+function with_output(rt::Runtime, input::AbstractVector, p)
+    @assert input isa VectorWithHandle
+    VectorWithHandle(handle(input), p(rt, output(input)))
+end
+
+function with_output(rt::Runtime, src::AbstractShape, p)
+    @assert src isa EntityShape
+    sig = p(rt, output(src))
+    return with_elements(sig, entity(src), options(src))
+end
+
+function with_output(sig::Signature, ety, opt)
+    src′ = EntityShape(ety, opt, source(sig))
+    tgt′ = BlockOf(ety, opt, target(sig))
+    bds′ = bindings(sig)
+    if bds′ !== nothing
+        src′ = HasSlots(src′, bds′.src_ary)
+        if bds′.tgt_ary > 0
+            tgt′ = HasSlots(tgt′, bds′.tgt_ary)
+        end
+    end
+    Signature(src′, tgt′, bds′)
+end
+
+function with_branch(::Type{<:EntityShape}, j, p)
+    @assert j == 1
+    with_output(p)
 end
 
 postgres_name(name::AbstractString) =
@@ -383,13 +418,16 @@ function rewrite_pushdown!(node::DataNode)
     backward_pass(node) do node
         @match_node if (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type]), input))
             other_cols = Tuple{String,Type}[]
+            keep = false
             for (n1, idx1) in node.uses
                 if (n1 ~ head_node(_))
                 elseif (n1 ~ part_node(_, _))
                     for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(p ~ load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
+                        if (n2 ~ pipe_node(load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
                             if n2_table_name == table_name && n2_icol == col
-                                push!(other_cols, (n2_col, n2_col_type))
+                                if !((n2_col, n2_col_type) in other_cols)
+                                    push!(other_cols, (n2_col, n2_col_type))
+                                end
                                 for (n3, idx3) in n2.uses
                                     if (n3 ~ head_node(_))
                                         for (n4, idx4) in n3.uses
@@ -406,22 +444,33 @@ function rewrite_pushdown!(node::DataNode)
                             else
                                 return
                             end
+                        elseif (n2 ~ slot_node(_))
                         else
-                            return
+                            keep = true
                         end
                     end
                 else
                     return
                 end
             end
-            length(other_cols) == 1 || return
+            length(other_cols) >= 1 || return
             repl = Pair{DataNode,DataNode}[]
+            new_col_names = String[]
+            new_col_types = Type[]
+            if keep
+                push!(new_col_names, col)
+                push!(new_col_types, col_type)
+            end
+            for (other_col_name, other_col_type) in other_cols
+                push!(new_col_names, other_col_name)
+                push!(new_col_types, other_col_type)
+            end
             other_col_name, other_col_type = other_cols[1]
             sig = signature(p)
             tgt = target(sig)
-            out′ = TupleOf(Symbol[Symbol(other_col_name)], AbstractShape[ValueOf(other_col_type)])
+            out′ = TupleOf(Symbol[Symbol(col_name) for col_name in new_col_names], AbstractShape[ValueOf(col_type) for col_type in new_col_types])
             tgt′ = BlockOf(EntityShape(entity(elements(tgt)), options(elements(tgt)), out′))
-            p′ = load_postgres_table(table_name, String[other_col_name], Type[other_col_type]) |> designate(source(sig), tgt′)
+            p′ = load_postgres_table(table_name, new_col_names, new_col_types) |> designate(source(sig), tgt′)
             node′ = pipe_node(p′, input)
             for (n1, idx1) in node.uses
                 if (n1 ~ head_node(_))
@@ -429,8 +478,21 @@ function rewrite_pushdown!(node::DataNode)
                     push!(repl, n1 => n1′)
                 elseif (n1 ~ part_node(_, _))
                     n1′ = part_node(node′, 1)
+                    if keep
+                        n1_head′ = head_node(n1′)
+                        n1_part′ = part_node(n1′, 1)
+                        n1_part_head′ = head_node(n1_part′)
+                        n1_part_part′ = part_node(n1_part′, 1)
+                        col_p = column(1) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [1]))
+                        col = pipe_node(col_p, n1_part_head′)
+                        tup_p = tuple_of(1) |> designate(Signature(SlotShape(), TupleOf(Symbol[Symbol(new_col_names[1])], AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
+                        tup = pipe_node(tup_p, col)
+                        tup_join = join_node(tup, [n1_part_part′])
+                        n1_join′ = join_node(n1_head′, [tup_join])
+                        push!(repl, n1 => n1_join′)
+                    end
                     for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(load_postgres_table(_, _, _, _), _))
+                        if (n2 ~ pipe_node(load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
                             for (n3, idx3) in n2.uses
                                 if (n3 ~ head_node(_))
                                     for (n4, idx4) in n3.uses
@@ -446,13 +508,31 @@ function rewrite_pushdown!(node::DataNode)
                                         end
                                      end
                                 elseif (n3 ~ part_node(_, _))
-                                    push!(repl, n3 => n1′)
+                                    if length(other_cols) == 1 && !keep
+                                        push!(repl, n3 => n1′)
+                                    else
+                                        pos = findfirst(==(n2_col), new_col_names)
+                                        @assert pos !== nothing
+                                        n1_head′ = head_node(n1′)
+                                        n1_part′ = part_node(n1′, 1)
+                                        n1_part_head′ = head_node(n1_part′)
+                                        n1_part_part′ = part_node(n1_part′, pos)
+                                        col_p = column(pos) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [pos]))
+                                        col = pipe_node(col_p, n1_part_head′)
+                                        tup_p = tuple_of(1) |> designate(Signature(SlotShape(), TupleOf(Symbol[Symbol(new_col_names[pos])], AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
+                                        tup = pipe_node(tup_p, col)
+                                        tup_join = join_node(tup, [n1_part_part′])
+                                        n1_join′ = join_node(n1_head′, [tup_join])
+                                        push!(repl, n3 => n1_join′)
+                                    end
                                 else
                                     error()
                                 end
                             end
+                        elseif (n2 ~ slot_node(_))
+                            push!(repl, n2 => slot_node(n1′))
                         else
-                            error()
+                            @assert keep
                         end
                     end
                 else
