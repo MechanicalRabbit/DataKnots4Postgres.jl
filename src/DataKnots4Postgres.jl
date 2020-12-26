@@ -416,7 +416,13 @@ rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
 
 function rewrite_pushdown!(node::DataNode)
     backward_pass(node) do node
-        @match_node if (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type]), input))
+        @match_node begin
+            if (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type]), input))
+                icol = nothing
+            elseif (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type], String[icol]), input))
+            else
+                return
+            end
             other_cols = Tuple{String,Type}[]
             keep = false
             for (n1, idx1) in node.uses
@@ -470,7 +476,7 @@ function rewrite_pushdown!(node::DataNode)
             tgt = target(sig)
             out′ = TupleOf(Symbol[Symbol(col_name) for col_name in new_col_names], AbstractShape[ValueOf(col_type) for col_type in new_col_types])
             tgt′ = BlockOf(EntityShape(entity(elements(tgt)), options(elements(tgt)), out′))
-            p′ = load_postgres_table(table_name, new_col_names, new_col_types) |> designate(source(sig), tgt′)
+            p′ = load_postgres_table(table_name, new_col_names, new_col_types, icol !== nothing ? String[icol] : String[]) |> designate(source(sig), tgt′)
             node′ = pipe_node(p′, input)
             for (n1, idx1) in node.uses
                 if (n1 ~ head_node(_))
