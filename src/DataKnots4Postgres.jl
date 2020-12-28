@@ -410,8 +410,8 @@ lookup(src::EntityShape, name::Symbol) =
 
 rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
     Pair{Int,Function}[
-        2 => rewrite_pushdown!,
-        3 => rewrite_simplify!,
+        100 => rewrite_pushdown!,
+        110 => rewrite_simplify!,
     ]
 
 function rewrite_pushdown!(node::DataNode)
