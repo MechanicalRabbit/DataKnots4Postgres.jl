@@ -27,9 +27,11 @@ import DataKnots:
     cover,
     designate,
     elements,
+    extract_branch,
     fill_node,
     fits,
     flatten,
+    forward_pass,
     head_node,
     join_node,
     lookup,
@@ -40,6 +42,7 @@ import DataKnots:
     render_cell,
     replace_branch,
     rewrite!,
+    rewrite_dedup!,
     rewrite_passes,
     rewrite_simplify!,
     signature,
@@ -184,6 +187,11 @@ function output(rt::Runtime, @nospecialize(shp::AbstractShape))
               1, [1])
 end
 
+function extract_branch(::EntityShape, j)
+    @assert j == 1
+    output()
+end
+
 with_output(p) = Pipeline(with_output, p)
 
 function with_output(rt::Runtime, input::AbstractVector, p)
@@ -210,7 +218,7 @@ function with_output(sig::Signature, ety, opt)
     Signature(src′, tgt′, bds′)
 end
 
-function with_branch(::Type{<:EntityShape}, j, p)
+function with_branch(::EntityShape, j, p)
     @assert j == 1
     with_output(p)
 end
@@ -410,9 +418,21 @@ lookup(src::EntityShape, name::Symbol) =
 
 rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
     Pair{Int,Function}[
+#        35 => rewrite_simplify_output!,
         100 => rewrite_pushdown!,
         110 => rewrite_simplify!,
+        120 => rewrite_dedup!,
     ]
+
+function rewrite_simplify_output!(node::DataNode)
+    forward_pass(node) do n
+        @match_node begin
+            if (n ~ fill_node(pipe_node(output(), head_node(base)), part ~ part_node(base′, _))) && base === base′
+                return rewrite!(n => part)
+            end
+        end
+    end
+end
 
 function rewrite_pushdown!(node::DataNode)
     backward_pass(node) do node
