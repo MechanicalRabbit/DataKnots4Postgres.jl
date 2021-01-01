@@ -25,6 +25,7 @@ import DataKnots:
     chain_of,
     column,
     cover,
+    deannotate,
     designate,
     elements,
     extract_branch,
@@ -235,13 +236,13 @@ postgres_name(names::AbstractVector) =
 postgres_name(name::Integer) =
     "\$$name"
 
-load_postgres_table(tbl_name, col_names, col_types) =
-    Pipeline(load_postgres_table, tbl_name, col_names, col_types)
+postgres_table(tbl_name, col_names, col_types) =
+    Pipeline(postgres_table, tbl_name, col_names, col_types)
 
-load_postgres_table(tbl_name, col_names, col_types, icol_names) =
-    Pipeline(load_postgres_table, tbl_name, col_names, col_types, icol_names)
+postgres_table(tbl_name, col_names, col_types, icol_names) =
+    Pipeline(postgres_table, tbl_name, col_names, col_types, icol_names)
 
-function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_names, col_types, icol_names=String[])
+function postgres_table(::Runtime, input::AbstractVector, tbl_name, col_names, col_types, icol_names=String[])
     @assert input isa VectorWithHandle
     sql = "SELECT $(postgres_name(col_names)) FROM $(postgres_name(tbl_name))"
     if !isempty(icol_names)
@@ -275,7 +276,7 @@ function load_postgres_table(::Runtime, input::AbstractVector, tbl_name, col_nam
     BlockVector(offs, hv)
 end
 
-function load_postgres_table(::Runtime, src::AbstractShape, tbl_name, col_names, col_types, icol_names=String[])
+function postgres_table(::Runtime, src::AbstractShape, tbl_name, col_names, col_types, icol_names=String[])
     @assert src isa EntityShape
     ety = entity(src)
     opt = options(src)
@@ -285,6 +286,66 @@ function load_postgres_table(::Runtime, src::AbstractShape, tbl_name, col_names,
     out′ = TupleOf(Symbol[Symbol(col_name) for col_name in col_names],
                    AbstractShape[ValueOf(col_type) for col_type in col_types])
     Signature(src, BlockOf(EntityShape(ety′, opt, out′)))
+end
+
+postgres_query(sql, col_types) =
+    Pipeline(postgres_query, sql, col_types)
+
+function postgres_query(::Runtime, input::AbstractVector, sql, col_types)
+    @assert input isa VectorWithHandle
+    results = []
+    for row in input
+        res = execute(handle(input).conn, sql, values(row))
+        push!(results, (length(res), columntable(res)))
+    end
+    offs = Vector{Int}(undef, length(results)+1)
+    offs[1] = top = 1
+    cols = AbstractVector[col_type[] for col_type in col_types]
+    for k = eachindex(results)
+        sz, res = results[k]
+        top += sz
+        offs[k+1] = top
+        for j = 1:length(cols)
+            append!(cols[j], res[j])
+        end
+    end
+    tv = TupleVector(Symbol[], top-1, cols)
+    h = handle(input)
+    hv = VectorWithHandle(h, tv)
+    BlockVector(offs, hv)
+end
+
+function postgres_query(::Runtime, src::AbstractShape, sql, col_types)
+    @assert src isa EntityShape
+    ety = entity(src)
+    opt = options(src)
+    out = output(src)
+    out′ = TupleOf(Symbol[],
+                   AbstractShape[ValueOf(col_type) for col_type in col_types])
+    Signature(src, BlockOf(EntityShape(ety, opt, out′)))
+end
+
+postgres_entity(tbl_name) =
+    Pipeline(postgres_entity, tbl_name)
+
+function postgres_entity(::Runtime, input::AbstractVector, tbl_name)
+    @assert input isa VectorWithHandle
+    h = handle(input)
+    ety = h.ety
+    ety′ = get_catalog(ety)[tbl_name[1]][tbl_name[2]]
+    h′ = Handle(h.conn, ety′, h.opt)
+    VectorWithHandle(h′, output(input))
+end
+
+function postgres_entity(::Runtime, src::AbstractShape, tbl_name)
+    @assert src isa EntityShape
+    ety = entity(src)
+    opt = options(src)
+    out = output(src)
+    ety′ = get_catalog(ety)[tbl_name[1]][tbl_name[2]]
+    Signature(EntityShape(ety, opt, SlotShape()) |> HasSlots(),
+              EntityShape(ety′, opt, SlotShape()) |> HasSlots(),
+              1, [1])
 end
 
 get_catalog(cat::PGCatalog) = cat
@@ -333,7 +394,7 @@ function lookup(src::EntityShape{PGSchema}, name::Symbol)
     tbl_name = (tbl.schema.name, tbl.name)
     col_names = [col.name for col in tbl.primary_key.columns]
     col_types = Type[get_type(col) for col in tbl.primary_key.columns]
-    p = load_postgres_table(tbl_name, col_names, col_types)
+    p = postgres_table(tbl_name, col_names, col_types)
     tgt = EntityShape(tbl, src.opt, TupleOf(Symbol.(col_names), ValueOf.(col_types))) |> IsLabeled(name) |> BlockOf
     p |> designate(src, tgt)
 end
@@ -349,7 +410,7 @@ function lookup(src::EntityShape{PGTable}, name::Symbol)
             icol_names = [col.name for col in tbl.primary_key.columns]
             c = cover(ValueOf(col_type) |> IsLabeled(name))
             return chain_of(
-                    load_postgres_table(tbl_name, col_names, col_types, icol_names),
+                    postgres_table(tbl_name, col_names, col_types, icol_names),
                     block_cardinality(x1to1),
                     with_elements(chain_of(output(), column(1), c)),
                     flatten(),
@@ -364,12 +425,12 @@ function lookup(src::EntityShape{PGTable}, name::Symbol)
             col_names = [col.name for col in fk.columns]
             col_types = Type[get_type(col) for col in fk.columns]
             icol_names = [col.name for col in tbl.primary_key.columns]
-            p0 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            p0 = postgres_table(tbl_name, col_names, col_types, icol_names)
             tbl_name = (ttbl.schema.name, ttbl.name)
             col_names = [col.name for col in ttbl.primary_key.columns]
             col_types = Type[get_type(col) for col in ttbl.primary_key.columns]
             icol_names = [col.name for col in fk.target_columns]
-            p1 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            p1 = postgres_table(tbl_name, col_names, col_types, icol_names)
             card = x1to1
             if any(col -> !col.not_null, fk.columns)
                 card |= x0to1
@@ -391,12 +452,12 @@ function lookup(src::EntityShape{PGTable}, name::Symbol)
             col_names = [col.name for col in fk.target_columns]
             col_types = Type[get_type(col) for col in fk.target_columns]
             icol_names = [col.name for col in tbl.primary_key.columns]
-            p0 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            p0 = postgres_table(tbl_name, col_names, col_types, icol_names)
             tbl_name = (ttbl.schema.name, ttbl.name)
             col_names = [col.name for col in ttbl.primary_key.columns]
             col_types = Type[get_type(col) for col in ttbl.primary_key.columns]
             icol_names = [col.name for col in fk.columns]
-            p1 = load_postgres_table(tbl_name, col_names, col_types, icol_names)
+            p1 = postgres_table(tbl_name, col_names, col_types, icol_names)
             card = x0to1
             if !any(uk -> uk.columns == fk.columns, ttbl.unique_keys)
                 card |= x1toN
@@ -437,9 +498,9 @@ end
 function rewrite_pushdown!(node::DataNode)
     backward_pass(node) do node
         @match_node begin
-            if (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type]), input))
+            if (node ~ pipe_node(p ~ postgres_table(table_name, String[col], Type[col_type]), input))
                 icol = nothing
-            elseif (node ~ pipe_node(p ~ load_postgres_table(table_name, String[col], Type[col_type], String[icol]), input))
+            elseif (node ~ pipe_node(p ~ postgres_table(table_name, String[col], Type[col_type], String[icol]), input))
             else
                 return
             end
@@ -449,7 +510,7 @@ function rewrite_pushdown!(node::DataNode)
                 if (n1 ~ head_node(_))
                 elseif (n1 ~ part_node(_, _))
                     for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
+                        if (n2 ~ pipe_node(postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
                             if n2_table_name == table_name && n2_icol == col
                                 if !((n2_col, n2_col_type) in other_cols)
                                     push!(other_cols, (n2_col, n2_col_type))
@@ -492,12 +553,36 @@ function rewrite_pushdown!(node::DataNode)
                 push!(new_col_types, other_col_type)
             end
             other_col_name, other_col_type = other_cols[1]
-            sig = signature(p)
-            tgt = target(sig)
-            out′ = TupleOf(Symbol[Symbol(col_name) for col_name in new_col_names], AbstractShape[ValueOf(col_type) for col_type in new_col_types])
-            tgt′ = BlockOf(EntityShape(entity(elements(tgt)), options(elements(tgt)), out′))
-            p′ = load_postgres_table(table_name, new_col_names, new_col_types, icol !== nothing ? String[icol] : String[]) |> designate(source(sig), tgt′)
-            node′ = pipe_node(p′, input)
+            w = length(new_col_names)
+            sql = "SELECT $(postgres_name(new_col_names)) FROM $(postgres_name(table_name))"
+            if icol !== nothing
+                sql = "$sql WHERE $(postgres_name(icol)) = $(postgres_name(1))"
+            end
+            src = source(p)
+            ety = entity(src)
+            opt = options(src)
+            ety′ = get_catalog(ety)[table_name[1]][table_name[2]]
+            tgt′ = BlockOf(EntityShape(ety, opt, TupleOf(Symbol[], AbstractShape[ValueOf(col_type) for col_type in new_col_types])))
+            query_p′ = postgres_query(sql, new_col_types) |> designate(src, tgt′)
+            query_node′ = pipe_node(query_p′, input)
+            node_head′ = head_node(query_node′)
+            node_part′ = part_node(query_node′, 1)
+            node_part_head′ = head_node(node_part′)
+            node_part_part′ = part_node(node_part′, 1)
+            node_part_part_head′ = head_node(node_part_part′)
+            node_part_part_parts′ = [column_node(node_part_part′, j) for j in 1:w]
+            entity_sig′ = Signature(EntityShape(ety, opt, SlotShape()) |> HasSlots, EntityShape(ety′, opt, SlotShape()) |> HasSlots, 1, [1])
+            entity_p′ = postgres_entity(table_name) |> designate(entity_sig′)
+            if ety !== ety′
+                entity_node′ = pipe_node(entity_p′, node_part_head′)
+            else
+                entity_node′ = node_part_head′
+            end
+            lbls′ = Symbol[Symbol(col_name) for col_name in new_col_names]
+            tup_sig′ = Signature(SlotShape(), TupleOf(lbls′, AbstractShape[SlotShape() for k = 1:w]) |> HasSlots(w), 1, fill(1, w))
+            tup_p′ = tuple_of(lbls′, length(new_col_names)) |> designate(tup_sig′)
+            tup_node′ = pipe_node(tup_p′, slot_node(node_part_part′))
+            node′ = join_node(node_head′, [join_node(entity_node′, [join_node(tup_node′, node_part_part_parts′)])])
             for (n1, idx1) in node.uses
                 if (n1 ~ head_node(_))
                     n1′ = head_node(node′)
@@ -511,14 +596,15 @@ function rewrite_pushdown!(node::DataNode)
                         n1_part_part′ = part_node(n1_part′, 1)
                         col_p = column(1) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [1]))
                         col = pipe_node(col_p, n1_part_head′)
-                        tup_p = tuple_of(1) |> designate(Signature(SlotShape(), TupleOf(Symbol[Symbol(new_col_names[1])], AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
+                        tup_lbls = Symbol[Symbol(new_col_names[1])]
+                        tup_p = tuple_of(tup_lbls, 1) |> designate(Signature(SlotShape(), TupleOf(tup_lbls, AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
                         tup = pipe_node(tup_p, col)
                         tup_join = join_node(tup, [n1_part_part′])
                         n1_join′ = join_node(n1_head′, [tup_join])
                         push!(repl, n1 => n1_join′)
                     end
                     for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(load_postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
+                        if (n2 ~ pipe_node(postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
                             for (n3, idx3) in n2.uses
                                 if (n3 ~ head_node(_))
                                     for (n4, idx4) in n3.uses
@@ -545,7 +631,8 @@ function rewrite_pushdown!(node::DataNode)
                                         n1_part_part′ = part_node(n1_part′, pos)
                                         col_p = column(pos) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [pos]))
                                         col = pipe_node(col_p, n1_part_head′)
-                                        tup_p = tuple_of(1) |> designate(Signature(SlotShape(), TupleOf(Symbol[Symbol(new_col_names[pos])], AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
+                                        tup_lbls = Symbol[Symbol(new_col_names[pos])]
+                                        tup_p = tuple_of(tup_lbls, 1) |> designate(Signature(SlotShape(), TupleOf(tup_lbls, AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
                                         tup = pipe_node(tup_p, col)
                                         tup_join = join_node(tup, [n1_part_part′])
                                         n1_join′ = join_node(n1_head′, [tup_join])
@@ -568,6 +655,22 @@ function rewrite_pushdown!(node::DataNode)
             rewrite!(repl)
         end
     end
+end
+
+function column_node(base, j)
+    head = head_node(base)
+    part = part_node(base, j)
+    w = width(deannotate(head.shp))
+    sig = Signature(head.shp, SlotShape(), w, [j])
+    fill_node(pipe_node(column(j) |> designate(sig), head), part)
+end
+
+function output_node(base)
+    head = head_node(base)
+    part = part_node(base, 1)
+    w = width(deannotate(head.shp))
+    sig = Signature(head.shp, SlotShape(), 1, [1])
+    fill_node(pipe_node(output() |> designate(sig), head), part)
 end
 
 end
