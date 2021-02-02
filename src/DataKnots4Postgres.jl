@@ -5,6 +5,7 @@ import DataKnots:
     AbstractShape,
     BlockOf,
     BlockVector,
+    Cardinality,
     DataKnot,
     DataNode,
     DataShape,
@@ -30,14 +31,17 @@ import DataKnots:
     elements,
     extract_branch,
     fill_node,
+    filler,
     fits,
     flatten,
     forward_pass,
+    get_root,
     head_node,
     join_node,
     lookup,
     part_node,
     pipe_node,
+    print_expr,
     quoteof,
     quoteof_inner,
     render_cell,
@@ -52,6 +56,7 @@ import DataKnots:
     source,
     syntaxof,
     target,
+    tuple_lift,
     tuple_of,
     width,
     with_branch,
@@ -77,7 +82,10 @@ using PostgresCatalog:
     PGSchema,
     PGTable,
     PGType,
+    PGUniqueKey,
     introspect
+
+import Base: show
 
 struct Options
 end
@@ -479,7 +487,6 @@ lookup(src::EntityShape, name::Symbol) =
 
 rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
     Pair{Int,Function}[
-#        35 => rewrite_simplify_output!,
         100 => rewrite_pushdown!,
         110 => rewrite_simplify!,
         120 => rewrite_dedup!,
@@ -491,168 +498,6 @@ function rewrite_simplify_output!(node::DataNode)
             if (n ~ fill_node(pipe_node(output(), head_node(base)), part ~ part_node(base′, _))) && base === base′
                 return rewrite!(n => part)
             end
-        end
-    end
-end
-
-function rewrite_pushdown!(node::DataNode)
-    backward_pass(node) do node
-        @match_node begin
-            if (node ~ pipe_node(p ~ postgres_table(table_name, String[col], Type[col_type]), input))
-                icol = nothing
-            elseif (node ~ pipe_node(p ~ postgres_table(table_name, String[col], Type[col_type], String[icol]), input))
-            else
-                return
-            end
-            other_cols = Tuple{String,Type}[]
-            keep = false
-            for (n1, idx1) in node.uses
-                if (n1 ~ head_node(_))
-                elseif (n1 ~ part_node(_, _))
-                    for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
-                            if n2_table_name == table_name && n2_icol == col
-                                if !((n2_col, n2_col_type) in other_cols)
-                                    push!(other_cols, (n2_col, n2_col_type))
-                                end
-                                for (n3, idx3) in n2.uses
-                                    if (n3 ~ head_node(_))
-                                        for (n4, idx4) in n3.uses
-                                            if (n4 ~ pipe_node(block_cardinality(card), _)) && card == x1to1
-                                            else
-                                                return
-                                            end
-                                         end
-                                    elseif (n3 ~ part_node(_, _))
-                                    else
-                                        return
-                                    end
-                                end
-                            else
-                                return
-                            end
-                        elseif (n2 ~ slot_node(_))
-                        else
-                            keep = true
-                        end
-                    end
-                else
-                    return
-                end
-            end
-            length(other_cols) >= 1 || return
-            repl = Pair{DataNode,DataNode}[]
-            new_col_names = String[]
-            new_col_types = Type[]
-            if keep
-                push!(new_col_names, col)
-                push!(new_col_types, col_type)
-            end
-            for (other_col_name, other_col_type) in other_cols
-                push!(new_col_names, other_col_name)
-                push!(new_col_types, other_col_type)
-            end
-            other_col_name, other_col_type = other_cols[1]
-            w = length(new_col_names)
-            sql = "SELECT $(postgres_name(new_col_names)) FROM $(postgres_name(table_name))"
-            if icol !== nothing
-                sql = "$sql WHERE $(postgres_name(icol)) = $(postgres_name(1))"
-            end
-            src = source(p)
-            ety = entity(src)
-            opt = options(src)
-            ety′ = get_catalog(ety)[table_name[1]][table_name[2]]
-            tgt′ = BlockOf(EntityShape(ety, opt, TupleOf(Symbol[], AbstractShape[ValueOf(col_type) for col_type in new_col_types])))
-            query_p′ = postgres_query(sql, new_col_types) |> designate(src, tgt′)
-            query_node′ = pipe_node(query_p′, input)
-            node_head′ = head_node(query_node′)
-            node_part′ = part_node(query_node′, 1)
-            node_part_head′ = head_node(node_part′)
-            node_part_part′ = part_node(node_part′, 1)
-            node_part_part_head′ = head_node(node_part_part′)
-            node_part_part_parts′ = [column_node(node_part_part′, j) for j in 1:w]
-            entity_sig′ = Signature(EntityShape(ety, opt, SlotShape()) |> HasSlots, EntityShape(ety′, opt, SlotShape()) |> HasSlots, 1, [1])
-            entity_p′ = postgres_entity(table_name) |> designate(entity_sig′)
-            if ety !== ety′
-                entity_node′ = pipe_node(entity_p′, node_part_head′)
-            else
-                entity_node′ = node_part_head′
-            end
-            lbls′ = Symbol[Symbol(col_name) for col_name in new_col_names]
-            tup_sig′ = Signature(SlotShape(), TupleOf(lbls′, AbstractShape[SlotShape() for k = 1:w]) |> HasSlots(w), 1, fill(1, w))
-            tup_p′ = tuple_of(lbls′, length(new_col_names)) |> designate(tup_sig′)
-            tup_node′ = pipe_node(tup_p′, slot_node(node_part_part′))
-            node′ = join_node(node_head′, [join_node(entity_node′, [join_node(tup_node′, node_part_part_parts′)])])
-            for (n1, idx1) in node.uses
-                if (n1 ~ head_node(_))
-                    n1′ = head_node(node′)
-                    push!(repl, n1 => n1′)
-                elseif (n1 ~ part_node(_, _))
-                    n1′ = part_node(node′, 1)
-                    if keep
-                        n1_head′ = head_node(n1′)
-                        n1_part′ = part_node(n1′, 1)
-                        n1_part_head′ = head_node(n1_part′)
-                        n1_part_part′ = part_node(n1_part′, 1)
-                        col_p = column(1) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [1]))
-                        col = pipe_node(col_p, n1_part_head′)
-                        tup_lbls = Symbol[Symbol(new_col_names[1])]
-                        tup_p = tuple_of(tup_lbls, 1) |> designate(Signature(SlotShape(), TupleOf(tup_lbls, AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
-                        tup = pipe_node(tup_p, col)
-                        tup_join = join_node(tup, [n1_part_part′])
-                        n1_join′ = join_node(n1_head′, [tup_join])
-                        push!(repl, n1 => n1_join′)
-                    end
-                    for (n2, idx2) in n1.uses
-                        if (n2 ~ pipe_node(postgres_table(n2_table_name, String[n2_col], Type[n2_col_type], String[n2_icol]), _))
-                            for (n3, idx3) in n2.uses
-                                if (n3 ~ head_node(_))
-                                    for (n4, idx4) in n3.uses
-                                        if (n4 ~ pipe_node(block_cardinality(card), _))
-                                            sig4′ = Signature(SlotShape(),
-                                                              BlockOf(SlotShape(), x1to1) |> HasSlots,
-                                                              1, [1])
-                                            p4′ = wrap() |> designate(sig4′)
-                                            n4′ = pipe_node(p4′, slot_node(n1′))
-                                            push!(repl, n4 => n4′)
-                                        else
-                                            error()
-                                        end
-                                     end
-                                elseif (n3 ~ part_node(_, _))
-                                    if length(other_cols) == 1 && !keep
-                                        push!(repl, n3 => n1′)
-                                    else
-                                        pos = findfirst(==(n2_col), new_col_names)
-                                        @assert pos !== nothing
-                                        n1_head′ = head_node(n1′)
-                                        n1_part′ = part_node(n1′, 1)
-                                        n1_part_head′ = head_node(n1_part′)
-                                        n1_part_part′ = part_node(n1_part′, pos)
-                                        col_p = column(pos) |> designate(Signature(n1_part_head′.shp, SlotShape(), length(new_col_names), [pos]))
-                                        col = pipe_node(col_p, n1_part_head′)
-                                        tup_lbls = Symbol[Symbol(new_col_names[pos])]
-                                        tup_p = tuple_of(tup_lbls, 1) |> designate(Signature(SlotShape(), TupleOf(tup_lbls, AbstractShape[SlotShape()]) |> HasSlots(1), 1, [1]))
-                                        tup = pipe_node(tup_p, col)
-                                        tup_join = join_node(tup, [n1_part_part′])
-                                        n1_join′ = join_node(n1_head′, [tup_join])
-                                        push!(repl, n3 => n1_join′)
-                                    end
-                                else
-                                    error()
-                                end
-                            end
-                        elseif (n2 ~ slot_node(_))
-                            push!(repl, n2 => slot_node(n1′))
-                        else
-                            @assert keep
-                        end
-                    end
-                else
-                    error()
-                end
-            end
-            rewrite!(repl)
         end
     end
 end
@@ -671,6 +516,507 @@ function output_node(base)
     w = width(deannotate(head.shp))
     sig = Signature(head.shp, SlotShape(), 1, [1])
     fill_node(pipe_node(output() |> designate(sig), head), part)
+end
+
+struct SQLExpr
+    head::Symbol
+    args::Vector{Any}
+
+    SQLExpr(head, args...) =
+        new(head, collect(Any, args))
+end
+
+show(io::IO, e::SQLExpr) =
+    print_expr(io, quoteof(e))
+
+quoteof(e::SQLExpr) =
+    Expr(:call, nameof(SQLExpr), QuoteNode(e.head), Any[quoteof(arg) for arg in e.args]...)
+
+mutable struct ToSQLContext <: IO
+    io::IOBuffer
+    need_select::Union{Bool,Nothing}
+
+    ToSQLContext() =
+        new(IOBuffer(), nothing)
+end
+
+Base.write(ctx::ToSQLContext, octet::UInt8) =
+    write(ctx.io, octet)
+
+Base.unsafe_write(ctx::ToSQLContext, input::Ptr{UInt8}, nbytes::UInt) =
+    unsafe_write(ctx.io, input, nbytes)
+
+function to_sql(@nospecialize ex)
+    ctx = ToSQLContext()
+    to_sql!(ctx, ex)
+    String(take!(ctx.io))
+end
+
+function to_sql!(ctx, ::Missing)
+    print(ctx, "NULL")
+end
+
+function to_sql!(ctx, b::Bool)
+    print(ctx, b ? "TRUE" : "FALSE")
+end
+
+function to_sql!(ctx, n::Number)
+    print(ctx, n)
+end
+
+function to_sql!(ctx, s::AbstractString)
+    print(ctx, '\'', replace(s, '\'' => "''"), '\'')
+end
+
+function to_sql!(ctx, n::Symbol)
+    print(ctx, '"', replace(string(n), '"' => "\"\""), '"')
+end
+
+function to_sql!(ctx, qn::Tuple{Symbol,Symbol})
+    to_sql!(ctx, qn[1])
+    print(ctx, '.')
+    to_sql!(ctx, qn[2])
+end
+
+to_sql!(ctx, e::SQLExpr) =
+    to_sql!(ctx, Val(e.head), e.args)
+
+function to_sql!(ctx, ::Val{:call}, args)
+    if length(args) == 3 && args[1] == :(=)
+        print(ctx, '(')
+        to_sql!(ctx, args[2])
+        print(ctx, ' ', args[1], ' ')
+        to_sql!(ctx, args[3])
+        print(ctx, ')')
+    elseif length(args) >= 1 && args[1] isa Symbol
+        print(ctx, args[1], '(')
+        first = true
+        for arg in args[2:end]
+            if first
+                first = false
+            else
+                print(ctx, ", ")
+            end
+            to_sql!(ctx, arg)
+        end
+        print(ctx, ')')
+    else
+        error()
+    end
+end
+
+function to_sql!(ctx, ::Val{:(&&)}, args)
+    print(ctx, '(')
+    if isempty(args)
+        print(ctx, "TRUE")
+    else
+        first = true
+        for arg in args
+            if !first
+                print(ctx, " AND ")
+            else
+                first = false
+            end
+            to_sql!(ctx, arg)
+        end
+    end
+    print(ctx, ')')
+end
+
+function to_sql!(ctx, ::Val{:slot}, args)
+    if ctx.need_select === false
+        return
+    end
+    print(ctx, "SELECT /* slot */")
+end
+
+function to_sql!(ctx, ::Val{:placeholder}, args)
+    k = args[1]
+    print(ctx, postgres_name(k))
+end
+
+function to_sql!(ctx, ::Val{:select}, args)
+    if ctx.need_select === false
+        return
+    end
+    print(ctx, "SELECT")
+    first = true
+    for arg in args
+        if first
+            print(ctx, ' ')
+            first = false
+        else
+            print(ctx, ", ")
+        end
+        to_sql!(ctx, arg)
+    end
+end
+
+function ensure_select!(f, ctx, tail)
+    need_select = ctx.need_select
+    if need_select === nothing
+        ctx.need_select = true
+        to_sql!(ctx, tail)
+        ctx.need_select = false
+        f()
+        ctx.need_select = nothing
+    elseif need_select
+        to_sql!(ctx, tail)
+    else
+        f()
+    end
+    nothing
+end
+
+function to_sql!(ctx, ::Val{:from}, args)
+    if length(args) == 3
+        alias, tbl, tail = args
+        ensure_select!(ctx, tail) do
+            print(ctx, " FROM ")
+            to_sql!(ctx, tbl)
+            print(ctx, " AS ")
+            to_sql!(ctx, alias)
+            to_sql!(ctx, tail)
+        end
+        return
+    end
+    error()
+end
+
+function to_sql!(ctx, ::Val{:join}, args)
+    if length(args) == 5
+        kind, alias, tbl, pred, tail = args
+        ensure_select!(ctx, tail) do
+            print(ctx, ' ', uppercase(string(kind)), " JOIN ")
+            to_sql!(ctx, tbl)
+            print(ctx, " AS ")
+            to_sql!(ctx, alias)
+            if kind !== :cross
+                print(ctx, " ON ")
+                to_sql!(ctx, pred)
+            end
+            to_sql!(ctx, tail)
+        end
+        return
+    end
+    error()
+end
+
+function to_sql!(ctx, ::Val{:where}, args)
+    if length(args) == 2
+        pred, tail = args
+        ensure_select!(ctx, tail) do
+            print(ctx, " WHERE ")
+            to_sql!(ctx, pred)
+            to_sql!(ctx, tail)
+        end
+        return
+    end
+    error()
+end
+
+mutable struct SQLAlias
+    tbl::PGTable
+    parent::Union{SQLAlias,Nothing}
+    children::Vector{SQLAlias}
+    on::Union{PGUniqueKey,PGForeignKey,Vector{PGColumn},Nothing}
+    name::Symbol
+
+    SQLAlias(tbl) =
+        new(tbl, nothing, SQLAlias[], nothing, gensym())
+
+    SQLAlias(tbl, on) =
+        new(tbl, nothing, SQLAlias[], on, gensym())
+
+    function SQLAlias(tbl, parent, on)
+        a = new(tbl, parent, SQLAlias[], on, gensym())
+        push!(parent.children, a)
+        a
+    end
+end
+
+abstract type AbstractTranslation end
+
+mutable struct LoadTable <: AbstractTranslation
+    alias::SQLAlias
+    cols::Vector{PGColumn}
+end
+
+mutable struct HeadOfRootLoadTable <: AbstractTranslation
+    base::LoadTable
+end
+
+mutable struct CardOfNestedLoadTable <: AbstractTranslation
+    base::LoadTable
+end
+
+mutable struct PartOfLoadTable <: AbstractTranslation
+    base::LoadTable
+end
+
+mutable struct SlotOfPartOfLoadTable <: AbstractTranslation
+    base::PartOfLoadTable
+end
+
+mutable struct OutputOfPartOfLoadTable <: AbstractTranslation
+    base::PartOfLoadTable
+end
+
+mutable struct ColumnOfOutputOfPartOfLoadTable <: AbstractTranslation
+    base::OutputOfPartOfLoadTable
+    k::Int
+end
+
+mutable struct SQLBundle
+    top::DataNode
+    root::SQLAlias
+    trs::Dict{DataNode,AbstractTranslation}
+    front::Vector{DataNode}
+
+    SQLBundle(top, root) =
+        new(top, root, Dict{DataNode,AbstractTranslation}(), DataNode[])
+end
+
+
+function rewrite_pushdown!(node::DataNode)
+    bundles = SQLBundle[]
+    bundle_by_node = Dict{DataNode,SQLBundle}()
+    forward_pass(node) do n
+        @match_node if (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type]), input))
+            ishp = input.shp::EntityShape{PGCatalog}
+            tbl = ishp.ety[table_name[1]][table_name[2]]
+            col = tbl[col_name]
+            root = SQLAlias(tbl)
+            bundle = SQLBundle(n, root)
+            push!(bundles, bundle)
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = LoadTable(root, [col])
+        elseif (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type], String[icol_name]), input))
+            bundle = get(bundle_by_node, input, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[input]
+            base_tr isa PartOfLoadTable || return
+            parent_alias = base_tr.base.alias
+            parent_tbl = parent_alias.tbl
+            parent_cols = base_tr.base.cols
+            joined_tbl = get_catalog(parent_tbl)[table_name[1]][table_name[2]]
+            joined_cols = [joined_tbl[icol_name]]
+            is_1to1 = false
+            on = nothing
+            if parent_tbl === joined_tbl && parent_tbl.primary_key !== nothing && parent_tbl.primary_key.columns == parent_cols == joined_cols
+                is_1to1 = true
+                on = parent_tbl.primary_key
+            elseif all(col.not_null for col in parent_cols)
+                for fk in parent_tbl.foreign_keys
+                    if fk.columns == parent_cols && fk.target_table === joined_tbl && fk.target_columns == joined_cols
+                        is_1to1 = true
+                        on = fk
+                        break
+                    end
+                end
+            end
+            if is_1to1
+                bundle_by_node[n] = bundle
+                alias = SQLAlias(joined_tbl, parent_alias, on)
+                bundle.trs[n] = LoadTable(alias, [joined_tbl[col_name]])
+            else
+                on = [joined_tbl[icol_name]]
+                root = SQLAlias(joined_tbl, on)
+                bundle = SQLBundle(n, root)
+                push!(bundles, bundle)
+                bundle_by_node[n] = bundle
+                bundle.trs[n] = LoadTable(root, [joined_tbl[col_name]])
+            end
+        elseif (n ~ head_node(base))
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa LoadTable && base_tr.alias.parent === nothing || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = HeadOfRootLoadTable(base_tr)
+        elseif (n ~ pipe_node(block_cardinality(card), head_node(base))) && card == x1to1
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa LoadTable && base_tr.alias.parent !== nothing || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = CardOfNestedLoadTable(base_tr)
+        elseif (n ~ part_node(base, _))
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa LoadTable || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = PartOfLoadTable(base_tr)
+        elseif (n ~ slot_node(base))
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa PartOfLoadTable || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = SlotOfPartOfLoadTable(base_tr)
+        elseif (n ~ fill_node(pipe_node(output(), head_node(base)), part_node(base′, _))) && base === base′
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa PartOfLoadTable || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = OutputOfPartOfLoadTable(base_tr)
+        elseif (n ~ fill_node(pipe_node(column(k::Int), head_node(base)), part_node(base′, _))) && base === base′
+            bundle = get(bundle_by_node, base, nothing)
+            bundle !== nothing || return
+            base_tr = bundle.trs[base]
+            base_tr isa OutputOfPartOfLoadTable || return
+            bundle_by_node[n] = bundle
+            bundle.trs[n] = ColumnOfOutputOfPartOfLoadTable(base_tr, k)
+        end
+    end
+    backward_pass(node) do n
+        bundle = get(bundle_by_node, n, nothing)
+        if bundle !== nothing
+            is_front = false
+            for (use, k) in n.uses
+                if get(bundle_by_node, use, nothing) !== bundle
+                    is_front = true
+                end
+            end
+            if is_front
+                push!(bundle.front, n)
+            end
+        else
+            common_bundle = missing
+            for (use, k) in n.uses
+                use_bundle = get(bundle_by_node, use, nothing)
+                if use_bundle !== nothing
+                    if common_bundle === missing
+                        common_bundle = use_bundle
+                    elseif common_bundle !== use_bundle
+                        common_bundle = nothing
+                    end
+                else
+                    common_bundle = nothing
+                end
+            end
+            if common_bundle !== missing && common_bundle !== nothing
+                bundle_by_node[n] = common_bundle
+            end
+        end
+    end
+    for bundle in bundles
+        ex, columns = make_sql(bundle)
+        sql = to_sql(ex)
+        col_types = Type[get_type(col) for (alias, col) in columns]
+        query_p = postgres_query(sql, col_types)
+        src = bundle.top.refs[1].shp
+        ety = entity(src)
+        opt = options(src)
+        out = output(src)
+        out′ = TupleOf(Symbol[],
+                       AbstractShape[ValueOf(col_type) for col_type in col_types])
+        sig = Signature(src, BlockOf(EntityShape(ety, opt, out′)))
+        query_node = pipe_node(query_p |> designate(sig), bundle.top.refs[1])
+        head_of_query_node = head_node(query_node)
+        part_of_query_node = part_node(query_node, 1)
+        output_of_query_node = output_node(part_of_query_node)
+        repl = Pair{DataNode,DataNode}[]
+        for n in bundle.front
+            tr = bundle.trs[n]
+            if tr isa HeadOfRootLoadTable
+                n′ = head_of_query_node
+            elseif tr isa CardOfNestedLoadTable
+                sig′ = Signature(SlotShape(), BlockOf(SlotShape(), x1to1) |> HasSlots, 1, [1])
+                p′ = wrap() |> designate(sig′)
+                n′ = pipe_node(p′, slot_node(part_of_query_node))
+            elseif tr isa PartOfLoadTable
+                alias = tr.base.alias
+                idxs = Int[findfirst(==((alias, col)), columns) for col in tr.base.cols]
+                lbls′ = Symbol[Symbol(col.name) for col in tr.base.cols]
+                head′ = head_node(part_of_query_node)
+                part′ = part_node(part_of_query_node, 1)
+                entity_sig′ = Signature(EntityShape(ety, opt, SlotShape()) |> HasSlots, EntityShape(alias.tbl, opt, SlotShape()) |> HasSlots, 1, [1])
+                entity_p′ = postgres_entity((alias.tbl.schema.name, alias.tbl.name)) |> designate(entity_sig′)
+                entity_node′ = pipe_node(entity_p′, head′)
+                tup_sig′ = Signature(SlotShape(), TupleOf(lbls′, AbstractShape[SlotShape() for k in idxs]) |> HasSlots(length(idxs)), 1, fill(1, length(idxs)))
+                tup_p′ = tuple_of(lbls′, length(idxs)) |> designate(tup_sig′)
+                tup_node′ = pipe_node(tup_p′, slot_node(part′))
+                n′ = join_node(entity_node′, [join_node(tup_node′, [column_node(part′, idx) for idx in idxs])])
+            elseif tr isa SlotOfPartOfLoadTable
+                n′ = slot_node(part_of_query_node)
+            elseif tr isa ColumnOfOutputOfPartOfLoadTable
+                alias = tr.base.base.base.alias
+                col = tr.base.base.base.cols[tr.k]
+                k = findfirst(==((alias, col)), columns)
+                n′ = column_node(output_of_query_node, k)
+            else
+                error(typeof(tr))
+            end
+            push!(repl, n => n′)
+        end
+        rewrite!(repl)
+    end
+end
+
+function make_columns(bundle)
+    columns = Tuple{SQLAlias,PGColumn}[]
+    for n in bundle.front
+        tr = bundle.trs[n]
+        k = nothing
+        if tr isa PartOfLoadTable
+            tr = tr.base
+        elseif tr isa OutputOfPartOfLoadTable
+            tr = tr.base.base
+        elseif tr isa ColumnOfOutputOfPartOfLoadTable
+            k = tr.k
+            tr = tr.base.base.base
+        end
+        if tr isa LoadTable
+            alias = tr.alias
+            cols = tr.cols
+            for (j, col) in enumerate(tr.cols)
+                if k === nothing || k == j
+                    push!(columns, (tr.alias, col))
+                end
+            end
+        end
+    end
+    return columns
+end
+
+function make_joins(alias, ex)
+    on = alias.on
+    if alias.parent === nothing && on isa Vector{PGColumn}
+        args = SQLExpr[]
+        for (k, col) in enumerate(on)
+            push!(args, SQLExpr(:call, :(=), (alias.name, Symbol(col.name)), SQLExpr(:placeholder, k)))
+        end
+        ex = SQLExpr(:where, SQLExpr(:(&&), args...), ex)
+    end
+    for child in alias.children
+        ex = make_joins(child, ex)
+    end
+    if alias.parent === nothing
+        ex = SQLExpr(:from, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), ex)
+    elseif on isa PGUniqueKey
+        args = SQLExpr[]
+        for col in on.columns
+            push!(args, SQLExpr(:call, :(=), (alias.parent.name, Symbol(col.name)), (alias.name, Symbol(col.name))))
+        end
+        ex = SQLExpr(:join, :inner, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), SQLExpr(:(&&), args...), ex)
+    elseif on isa PGForeignKey
+        args = SQLExpr[]
+        for (col1, col2) in zip(on.columns, on.target_columns)
+            push!(args, SQLExpr(:call, :(=), (alias.parent.name, Symbol(col1.name)), (alias.name, Symbol(col2.name))))
+        end
+        ex = SQLExpr(:join, :inner, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), SQLExpr(:(&&), args...), ex)
+    end
+    ex
+end
+
+function make_sql(bundle)
+    columns = make_columns(bundle)
+    select = SQLExpr(:select, [(alias.name, Symbol(col.name)) for (alias, col) in columns]...)
+    ex = make_joins(bundle.root, select)
+    ex, columns
 end
 
 end
