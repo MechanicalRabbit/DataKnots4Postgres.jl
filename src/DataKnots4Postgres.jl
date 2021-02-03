@@ -735,53 +735,27 @@ mutable struct SQLAlias
     end
 end
 
-abstract type AbstractTranslation end
-
-mutable struct LoadTable <: AbstractTranslation
-    alias::SQLAlias
-    cols::Vector{PGColumn}
-end
-
-mutable struct HeadOfRootLoadTable <: AbstractTranslation
-    base::LoadTable
-end
-
-mutable struct CardOfNestedLoadTable <: AbstractTranslation
-    base::LoadTable
-end
-
-mutable struct PartOfLoadTable <: AbstractTranslation
-    base::LoadTable
-end
-
-mutable struct SlotOfPartOfLoadTable <: AbstractTranslation
-    base::PartOfLoadTable
-end
-
-mutable struct OutputOfPartOfLoadTable <: AbstractTranslation
-    base::PartOfLoadTable
-end
-
-mutable struct ColumnOfOutputOfPartOfLoadTable <: AbstractTranslation
-    base::OutputOfPartOfLoadTable
-    k::Int
-end
-
 mutable struct SQLBundle
     top::DataNode
     root::SQLAlias
-    trs::Dict{DataNode,AbstractTranslation}
     front::Vector{DataNode}
 
     SQLBundle(top, root) =
-        new(top, root, Dict{DataNode,AbstractTranslation}(), DataNode[])
+        new(top, root, DataNode[])
 end
 
+struct SQLMemo
+    bundle::SQLBundle
+    alias::SQLAlias
+    cols::Vector{PGColumn}
+    kind::Symbol
+    k::Int
+end
 
 function rewrite_pushdown!(node::DataNode)
     bundles = SQLBundle[]
-    bundle_by_node = Dict{DataNode,SQLBundle}()
     forward_pass(node) do n
+        n.memo = nothing
         @match_node if (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type]), input))
             ishp = input.shp::EntityShape{PGCatalog}
             tbl = ishp.ety[table_name[1]][table_name[2]]
@@ -789,16 +763,13 @@ function rewrite_pushdown!(node::DataNode)
             root = SQLAlias(tbl)
             bundle = SQLBundle(n, root)
             push!(bundles, bundle)
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = LoadTable(root, [col])
+            n.memo = SQLMemo(bundle, root, [col], :table, 0)
         elseif (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type], String[icol_name]), input))
-            bundle = get(bundle_by_node, input, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[input]
-            base_tr isa PartOfLoadTable || return
-            parent_alias = base_tr.base.alias
+            base_tr = input.memo
+            base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
+            parent_alias = base_tr.alias
             parent_tbl = parent_alias.tbl
-            parent_cols = base_tr.base.cols
+            parent_cols = base_tr.cols
             joined_tbl = get_catalog(parent_tbl)[table_name[1]][table_name[2]]
             joined_cols = [joined_tbl[icol_name]]
             is_1to1 = false
@@ -816,89 +787,58 @@ function rewrite_pushdown!(node::DataNode)
                 end
             end
             if is_1to1
-                bundle_by_node[n] = bundle
                 alias = SQLAlias(joined_tbl, parent_alias, on)
-                bundle.trs[n] = LoadTable(alias, [joined_tbl[col_name]])
+                n.memo = SQLMemo(base_tr.bundle, alias, [joined_tbl[col_name]], :table, 0)
             else
                 on = [joined_tbl[icol_name]]
                 root = SQLAlias(joined_tbl, on)
                 bundle = SQLBundle(n, root)
                 push!(bundles, bundle)
-                bundle_by_node[n] = bundle
-                bundle.trs[n] = LoadTable(root, [joined_tbl[col_name]])
+                n.memo = SQLMemo(bundle, root, [joined_tbl[col_name]], :table, 0)
             end
         elseif (n ~ head_node(base))
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa LoadTable && base_tr.alias.parent === nothing || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = HeadOfRootLoadTable(base_tr)
-        elseif (n ~ pipe_node(block_cardinality(card), head_node(base))) && card == x1to1
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa LoadTable && base_tr.alias.parent !== nothing || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = CardOfNestedLoadTable(base_tr)
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :table && base_tr.alias.parent === nothing || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :head_of_root_table, 0)
+        elseif (n ~ pipe_node(block_cardinality(card), head ~ head_node(base))) && card == x1to1
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :table && base_tr.alias.parent !== nothing || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :card_of_nested_table, 0)
+            head.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :other, 0)
         elseif (n ~ part_node(base, _))
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa LoadTable || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = PartOfLoadTable(base_tr)
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :table || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :part_of_table, 0)
         elseif (n ~ slot_node(base))
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa PartOfLoadTable || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = SlotOfPartOfLoadTable(base_tr)
-        elseif (n ~ fill_node(pipe_node(output(), head_node(base)), part_node(base′, _))) && base === base′
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa PartOfLoadTable || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = OutputOfPartOfLoadTable(base_tr)
-        elseif (n ~ fill_node(pipe_node(column(k::Int), head_node(base)), part_node(base′, _))) && base === base′
-            bundle = get(bundle_by_node, base, nothing)
-            bundle !== nothing || return
-            base_tr = bundle.trs[base]
-            base_tr isa OutputOfPartOfLoadTable || return
-            bundle_by_node[n] = bundle
-            bundle.trs[n] = ColumnOfOutputOfPartOfLoadTable(base_tr, k)
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :slot_of_part_of_table, 0)
+        elseif (n ~ fill_node(slot ~ pipe_node(output(), head ~ head_node(base)), part ~ part_node(base′, _))) && base === base′
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :output_of_part_of_table, 0)
+            slot.memo = head.memo = part.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :other, 0)
+        elseif (n ~ fill_node(slot ~ pipe_node(column(k::Int), head ~ head_node(base)), part ~ part_node(base′, _))) && base === base′
+            base_tr = base.memo
+            base_tr isa SQLMemo && base_tr.kind === :output_of_part_of_table || return
+            n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :column_of_output_of_part_of_table, k)
+            slot.memo = head.memo = part.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :other, 0)
         end
     end
     backward_pass(node) do n
-        bundle = get(bundle_by_node, n, nothing)
-        if bundle !== nothing
+        tr = n.memo
+        if tr isa SQLMemo
+            bundle = tr.bundle
             is_front = false
             for (use, k) in n.uses
-                if get(bundle_by_node, use, nothing) !== bundle
+                use_tr = use.memo
+                if !(use_tr isa SQLMemo && use_tr.bundle === bundle)
                     is_front = true
+                    break
                 end
             end
             if is_front
                 push!(bundle.front, n)
-            end
-        else
-            common_bundle = missing
-            for (use, k) in n.uses
-                use_bundle = get(bundle_by_node, use, nothing)
-                if use_bundle !== nothing
-                    if common_bundle === missing
-                        common_bundle = use_bundle
-                    elseif common_bundle !== use_bundle
-                        common_bundle = nothing
-                    end
-                else
-                    common_bundle = nothing
-                end
-            end
-            if common_bundle !== missing && common_bundle !== nothing
-                bundle_by_node[n] = common_bundle
             end
         end
     end
@@ -920,17 +860,17 @@ function rewrite_pushdown!(node::DataNode)
         output_of_query_node = output_node(part_of_query_node)
         repl = Pair{DataNode,DataNode}[]
         for n in bundle.front
-            tr = bundle.trs[n]
-            if tr isa HeadOfRootLoadTable
+            tr = n.memo::SQLMemo
+            if tr.kind === :head_of_root_table
                 n′ = head_of_query_node
-            elseif tr isa CardOfNestedLoadTable
+            elseif tr.kind === :card_of_nested_table
                 sig′ = Signature(SlotShape(), BlockOf(SlotShape(), x1to1) |> HasSlots, 1, [1])
                 p′ = wrap() |> designate(sig′)
                 n′ = pipe_node(p′, slot_node(part_of_query_node))
-            elseif tr isa PartOfLoadTable
-                alias = tr.base.alias
-                idxs = Int[findfirst(==((alias, col)), columns) for col in tr.base.cols]
-                lbls′ = Symbol[Symbol(col.name) for col in tr.base.cols]
+            elseif tr.kind === :part_of_table
+                alias = tr.alias
+                idxs = Int[findfirst(==((alias, col)), columns) for col in tr.cols]
+                lbls′ = Symbol[Symbol(col.name) for col in tr.cols]
                 head′ = head_node(part_of_query_node)
                 part′ = part_node(part_of_query_node, 1)
                 entity_sig′ = Signature(EntityShape(ety, opt, SlotShape()) |> HasSlots, EntityShape(alias.tbl, opt, SlotShape()) |> HasSlots, 1, [1])
@@ -940,15 +880,15 @@ function rewrite_pushdown!(node::DataNode)
                 tup_p′ = tuple_of(lbls′, length(idxs)) |> designate(tup_sig′)
                 tup_node′ = pipe_node(tup_p′, slot_node(part′))
                 n′ = join_node(entity_node′, [join_node(tup_node′, [column_node(part′, idx) for idx in idxs])])
-            elseif tr isa SlotOfPartOfLoadTable
+            elseif tr.kind === :slot_of_part_of_table
                 n′ = slot_node(part_of_query_node)
-            elseif tr isa ColumnOfOutputOfPartOfLoadTable
-                alias = tr.base.base.base.alias
-                col = tr.base.base.base.cols[tr.k]
+            elseif tr.kind === :column_of_output_of_part_of_table
+                alias = tr.alias
+                col = tr.cols[tr.k]
                 k = findfirst(==((alias, col)), columns)
                 n′ = column_node(output_of_query_node, k)
             else
-                error(typeof(tr))
+                error(tr.kind)
             end
             push!(repl, n => n′)
         end
@@ -959,23 +899,13 @@ end
 function make_columns(bundle)
     columns = Tuple{SQLAlias,PGColumn}[]
     for n in bundle.front
-        tr = bundle.trs[n]
-        k = nothing
-        if tr isa PartOfLoadTable
-            tr = tr.base
-        elseif tr isa OutputOfPartOfLoadTable
-            tr = tr.base.base
-        elseif tr isa ColumnOfOutputOfPartOfLoadTable
-            k = tr.k
-            tr = tr.base.base.base
-        end
-        if tr isa LoadTable
-            alias = tr.alias
-            cols = tr.cols
-            for (j, col) in enumerate(tr.cols)
-                if k === nothing || k == j
-                    push!(columns, (tr.alias, col))
-                end
+        tr = n.memo::SQLMemo
+        tr.kind in (:part_of_table, :output_of_part_of_table, :column_of_output_of_part_of_table) || continue
+        if tr.k != 0
+            push!(columns, (tr.alias, tr.cols[tr.k]))
+        else
+            for col in tr.cols
+                push!(columns, (tr.alias, col))
             end
         end
     end
