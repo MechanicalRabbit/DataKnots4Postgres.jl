@@ -28,6 +28,7 @@ import DataKnots:
     cover,
     deannotate,
     designate,
+    dissect,
     elements,
     extract_branch,
     fill_node,
@@ -65,7 +66,7 @@ import DataKnots:
     x0to1,
     x1to1,
     x1toN,
-    @match_node
+    @dissect
 
 using Tables
 
@@ -196,6 +197,9 @@ function output(rt::Runtime, @nospecialize(shp::AbstractShape))
               1, [1])
 end
 
+dissect(mod::Module, scr::Symbol, ::typeof(output), ::Tuple{}) =
+    dissect(mod, scr, Pipeline, (output, :([])))
+
 function extract_branch(::EntityShape, j)
     @assert j == 1
     output()
@@ -294,6 +298,21 @@ function postgres_table(::Runtime, src::AbstractShape, tbl_name, col_names, col_
     out′ = TupleOf(Symbol[Symbol(col_name) for col_name in col_names],
                    AbstractShape[ValueOf(col_type) for col_type in col_types])
     Signature(src, BlockOf(EntityShape(ety′, opt, out′)))
+end
+
+function dissect(mod::Module, scr::Symbol, ::typeof(postgres_table), @nospecialize pats::Tuple{Any,Any,Any})
+    tbl_pat, col_pat, colt_pat = pats
+    dissect(mod, scr, Pipeline, (postgres_table, :([$tbl_pat::$(Tuple{String,String}), $col_pat::$(Vector{String}), $colt_pat::$(Vector{Type})])))
+end
+
+function dissect(mod::Module, scr::Symbol, ::typeof(postgres_table), @nospecialize pats::Tuple{Any,Any,Any,Any})
+    tbl_pat, col_pat, colt_pat, icol_pat = pats
+    dissect(mod, scr, Pipeline, (postgres_table, :([$tbl_pat::$(Tuple{String,String}), $col_pat::$(Vector{String}), $colt_pat::$(Vector{Type}), $icol_pat::$(Vector{String})])))
+end
+
+function dissect(mod::Module, scr::Symbol, ::typeof(block_cardinality), @nospecialize pats::Tuple{Any})
+    card_pat, = pats
+    dissect(mod, scr, Pipeline, (block_cardinality, :([$card_pat::Cardinality])))
 end
 
 postgres_query(sql, col_types) =
@@ -494,7 +513,7 @@ rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
 
 function rewrite_simplify_output!(node::DataNode)
     forward_pass(node) do n
-        @match_node begin
+        @dissect begin
             if (n ~ fill_node(pipe_node(output(), head_node(base)), part ~ part_node(base′, _))) && base === base′
                 return rewrite!(n => part)
             end
@@ -756,7 +775,7 @@ function rewrite_pushdown!(node::DataNode)
     bundles = SQLBundle[]
     forward_pass(node) do n
         n.memo = nothing
-        @match_node if (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type]), input))
+        @dissect if (n ~ pipe_node(p ~ postgres_table(table_name, [col_name], [col_type]), input))
             ishp = input.shp::EntityShape{PGCatalog}
             tbl = ishp.ety[table_name[1]][table_name[2]]
             col = tbl[col_name]
@@ -764,7 +783,7 @@ function rewrite_pushdown!(node::DataNode)
             bundle = SQLBundle(n, root)
             push!(bundles, bundle)
             n.memo = SQLMemo(bundle, root, [col], :table, 0)
-        elseif (n ~ pipe_node(p ~ postgres_table(table_name::Tuple{String,String}, String[col_name], Type[col_type], String[icol_name]), input))
+        elseif (n ~ pipe_node(p ~ postgres_table(table_name, [col_name], [col_type], [icol_name]), input))
             base_tr = input.memo
             base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
             parent_alias = base_tr.alias
