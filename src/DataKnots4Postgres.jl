@@ -88,6 +88,8 @@ using PostgresCatalog:
 
 import Base: show
 
+include("funsql.jl")
+
 struct Options
 end
 
@@ -514,7 +516,7 @@ rewrite_passes(::Val{(:DataKnots4Postgres,)}) =
 function rewrite_simplify_output!(node::DataNode)
     forward_pass(node) do n
         @dissect begin
-            if (n ~ fill_node(pipe_node(output(), head_node(base)), part ~ part_node(base′, _))) && base === base′
+            if (n ~ fill_node(pipe_node(output(), head_node(base)), part := part_node(base′, _))) && base === base′
                 return rewrite!(n => part)
             end
         end
@@ -535,203 +537,6 @@ function output_node(base)
     w = width(deannotate(head.shp))
     sig = Signature(head.shp, SlotShape(), 1, [1])
     fill_node(pipe_node(output() |> designate(sig), head), part)
-end
-
-struct SQLExpr
-    head::Symbol
-    args::Vector{Any}
-
-    SQLExpr(head, args...) =
-        new(head, collect(Any, args))
-end
-
-show(io::IO, e::SQLExpr) =
-    print_expr(io, quoteof(e))
-
-quoteof(e::SQLExpr) =
-    Expr(:call, nameof(SQLExpr), QuoteNode(e.head), Any[quoteof(arg) for arg in e.args]...)
-
-mutable struct ToSQLContext <: IO
-    io::IOBuffer
-    need_select::Union{Bool,Nothing}
-
-    ToSQLContext() =
-        new(IOBuffer(), nothing)
-end
-
-Base.write(ctx::ToSQLContext, octet::UInt8) =
-    write(ctx.io, octet)
-
-Base.unsafe_write(ctx::ToSQLContext, input::Ptr{UInt8}, nbytes::UInt) =
-    unsafe_write(ctx.io, input, nbytes)
-
-function to_sql(@nospecialize ex)
-    ctx = ToSQLContext()
-    to_sql!(ctx, ex)
-    String(take!(ctx.io))
-end
-
-function to_sql!(ctx, ::Missing)
-    print(ctx, "NULL")
-end
-
-function to_sql!(ctx, b::Bool)
-    print(ctx, b ? "TRUE" : "FALSE")
-end
-
-function to_sql!(ctx, n::Number)
-    print(ctx, n)
-end
-
-function to_sql!(ctx, s::AbstractString)
-    print(ctx, '\'', replace(s, '\'' => "''"), '\'')
-end
-
-function to_sql!(ctx, n::Symbol)
-    print(ctx, '"', replace(string(n), '"' => "\"\""), '"')
-end
-
-function to_sql!(ctx, qn::Tuple{Symbol,Symbol})
-    to_sql!(ctx, qn[1])
-    print(ctx, '.')
-    to_sql!(ctx, qn[2])
-end
-
-to_sql!(ctx, e::SQLExpr) =
-    to_sql!(ctx, Val(e.head), e.args)
-
-function to_sql!(ctx, ::Val{:call}, args)
-    if length(args) == 3 && args[1] == :(=)
-        print(ctx, '(')
-        to_sql!(ctx, args[2])
-        print(ctx, ' ', args[1], ' ')
-        to_sql!(ctx, args[3])
-        print(ctx, ')')
-    elseif length(args) >= 1 && args[1] isa Symbol
-        print(ctx, args[1], '(')
-        first = true
-        for arg in args[2:end]
-            if first
-                first = false
-            else
-                print(ctx, ", ")
-            end
-            to_sql!(ctx, arg)
-        end
-        print(ctx, ')')
-    else
-        error()
-    end
-end
-
-function to_sql!(ctx, ::Val{:(&&)}, args)
-    print(ctx, '(')
-    if isempty(args)
-        print(ctx, "TRUE")
-    else
-        first = true
-        for arg in args
-            if !first
-                print(ctx, " AND ")
-            else
-                first = false
-            end
-            to_sql!(ctx, arg)
-        end
-    end
-    print(ctx, ')')
-end
-
-function to_sql!(ctx, ::Val{:slot}, args)
-    if ctx.need_select === false
-        return
-    end
-    print(ctx, "SELECT /* slot */")
-end
-
-function to_sql!(ctx, ::Val{:placeholder}, args)
-    k = args[1]
-    print(ctx, postgres_name(k))
-end
-
-function to_sql!(ctx, ::Val{:select}, args)
-    if ctx.need_select === false
-        return
-    end
-    print(ctx, "SELECT")
-    first = true
-    for arg in args
-        if first
-            print(ctx, ' ')
-            first = false
-        else
-            print(ctx, ", ")
-        end
-        to_sql!(ctx, arg)
-    end
-end
-
-function ensure_select!(f, ctx, tail)
-    need_select = ctx.need_select
-    if need_select === nothing
-        ctx.need_select = true
-        to_sql!(ctx, tail)
-        ctx.need_select = false
-        f()
-        ctx.need_select = nothing
-    elseif need_select
-        to_sql!(ctx, tail)
-    else
-        f()
-    end
-    nothing
-end
-
-function to_sql!(ctx, ::Val{:from}, args)
-    if length(args) == 3
-        alias, tbl, tail = args
-        ensure_select!(ctx, tail) do
-            print(ctx, " FROM ")
-            to_sql!(ctx, tbl)
-            print(ctx, " AS ")
-            to_sql!(ctx, alias)
-            to_sql!(ctx, tail)
-        end
-        return
-    end
-    error()
-end
-
-function to_sql!(ctx, ::Val{:join}, args)
-    if length(args) == 5
-        kind, alias, tbl, pred, tail = args
-        ensure_select!(ctx, tail) do
-            print(ctx, ' ', uppercase(string(kind)), " JOIN ")
-            to_sql!(ctx, tbl)
-            print(ctx, " AS ")
-            to_sql!(ctx, alias)
-            if kind !== :cross
-                print(ctx, " ON ")
-                to_sql!(ctx, pred)
-            end
-            to_sql!(ctx, tail)
-        end
-        return
-    end
-    error()
-end
-
-function to_sql!(ctx, ::Val{:where}, args)
-    if length(args) == 2
-        pred, tail = args
-        ensure_select!(ctx, tail) do
-            print(ctx, " WHERE ")
-            to_sql!(ctx, pred)
-            to_sql!(ctx, tail)
-        end
-        return
-    end
-    error()
 end
 
 mutable struct SQLAlias
@@ -775,7 +580,7 @@ function rewrite_pushdown!(node::DataNode)
     bundles = SQLBundle[]
     forward_pass(node) do n
         n.memo = nothing
-        @dissect if (n ~ pipe_node(p ~ postgres_table(table_name, [col_name], [col_type]), input))
+        @dissect if (n ~ pipe_node(p := postgres_table(table_name, [col_name], [col_type]), input))
             ishp = input.shp::EntityShape{PGCatalog}
             tbl = ishp.ety[table_name[1]][table_name[2]]
             col = tbl[col_name]
@@ -783,7 +588,7 @@ function rewrite_pushdown!(node::DataNode)
             bundle = SQLBundle(n, root)
             push!(bundles, bundle)
             n.memo = SQLMemo(bundle, root, [col], :table, 0)
-        elseif (n ~ pipe_node(p ~ postgres_table(table_name, [col_name], [col_type], [icol_name]), input))
+        elseif (n ~ pipe_node(p := postgres_table(table_name, [col_name], [col_type], [icol_name]), input))
             base_tr = input.memo
             base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
             parent_alias = base_tr.alias
@@ -819,7 +624,7 @@ function rewrite_pushdown!(node::DataNode)
             base_tr = base.memo
             base_tr isa SQLMemo && base_tr.kind === :table && base_tr.alias.parent === nothing || return
             n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :head_of_root_table, 0)
-        elseif (n ~ pipe_node(block_cardinality(card), head ~ head_node(base))) && card == x1to1
+        elseif (n ~ pipe_node(block_cardinality(card), head := head_node(base))) && card == x1to1
             base_tr = base.memo
             base_tr isa SQLMemo && base_tr.kind === :table && base_tr.alias.parent !== nothing || return
             n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :card_of_nested_table, 0)
@@ -832,12 +637,12 @@ function rewrite_pushdown!(node::DataNode)
             base_tr = base.memo
             base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
             n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :slot_of_part_of_table, 0)
-        elseif (n ~ fill_node(slot ~ pipe_node(output(), head ~ head_node(base)), part ~ part_node(base′, _))) && base === base′
+        elseif (n ~ fill_node(slot := pipe_node(output(), head := head_node(base)), part := part_node(base′, _))) && base === base′
             base_tr = base.memo
             base_tr isa SQLMemo && base_tr.kind === :part_of_table || return
             n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :output_of_part_of_table, 0)
             slot.memo = head.memo = part.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :other, 0)
-        elseif (n ~ fill_node(slot ~ pipe_node(column(k::Int), head ~ head_node(base)), part ~ part_node(base′, _))) && base === base′
+        elseif (n ~ fill_node(slot := pipe_node(column(k::Int), head := head_node(base)), part := part_node(base′, _))) && base === base′
             base_tr = base.memo
             base_tr isa SQLMemo && base_tr.kind === :output_of_part_of_table || return
             n.memo = SQLMemo(base_tr.bundle, base_tr.alias, base_tr.cols, :column_of_output_of_part_of_table, k)
@@ -931,41 +736,55 @@ function make_columns(bundle)
     return columns
 end
 
-function make_joins(alias, ex)
+function make_joins(join, alias, alias_to_from)
     on = alias.on
-    if alias.parent === nothing && on isa Vector{PGColumn}
-        args = SQLExpr[]
-        for (k, col) in enumerate(on)
-            push!(args, SQLExpr(:call, :(=), (alias.name, Symbol(col.name)), SQLExpr(:placeholder, k)))
+    tbl = Table(Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name), Symbol[])
+    from = From(tbl)
+    alias_to_from[alias] = from
+    if alias.parent === nothing
+        @assert join === nothing
+        join = from
+    elseif on isa PGUniqueKey
+        parent_from = alias_to_from[alias.parent]
+        args = SQLValue[]
+        for col in on.columns
+            push!(args, Op(:(=), Pick(parent_from, Symbol(col.name)), Pick(from, Symbol(col.name))))
         end
-        ex = SQLExpr(:where, SQLExpr(:(&&), args...), ex)
+        pred = Op(:(&&), args...)
+        join = Join(join, from, pred)
+    elseif on isa PGForeignKey
+        parent_from = alias_to_from[alias.parent]
+        args = SQLValue[]
+        for (col1, col2) in zip(on.columns, on.target_columns)
+            push!(args, Op(:(=), Pick(parent_from, Symbol(col1.name)), Pick(from, Symbol(col2.name))))
+        end
+        pred = Op(:(&&), args...)
+        join = Join(join, from, pred)
     end
     for child in alias.children
-        ex = make_joins(child, ex)
+        join = make_joins(join, child, alias_to_from)
     end
-    if alias.parent === nothing
-        ex = SQLExpr(:from, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), ex)
-    elseif on isa PGUniqueKey
-        args = SQLExpr[]
-        for col in on.columns
-            push!(args, SQLExpr(:call, :(=), (alias.parent.name, Symbol(col.name)), (alias.name, Symbol(col.name))))
+    if alias.parent === nothing && on isa Vector{PGColumn}
+        args = SQLValue[]
+        for (k, col) in enumerate(on)
+            push!(args, Op(:(=), Pick(from, Symbol(col.name)), Op(:placeholder, Const(k))))
         end
-        ex = SQLExpr(:join, :inner, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), SQLExpr(:(&&), args...), ex)
-    elseif on isa PGForeignKey
-        args = SQLExpr[]
-        for (col1, col2) in zip(on.columns, on.target_columns)
-            push!(args, SQLExpr(:call, :(=), (alias.parent.name, Symbol(col1.name)), (alias.name, Symbol(col2.name))))
-        end
-        ex = SQLExpr(:join, :inner, alias.name, (Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name)), SQLExpr(:(&&), args...), ex)
+        pred = Op(:(&&), args...)
+        join = Where(join, pred)
     end
-    ex
+    join
 end
 
 function make_sql(bundle)
     columns = make_columns(bundle)
-    select = SQLExpr(:select, [(alias.name, Symbol(col.name)) for (alias, col) in columns]...)
-    ex = make_joins(bundle.root, select)
-    ex, columns
+    alias_to_from = Dict{SQLAlias,SQLClause}()
+    j = make_joins(nothing, bundle.root, alias_to_from)
+    list = Pair{Symbol,SQLValue}[]
+    for (alias, col) in columns
+        push!(list, Symbol(col.name) => Pick(alias_to_from[alias], Symbol(col.name)))
+    end
+    select = Select(j; list...)
+    return normalize(select), columns
 end
 
 end
