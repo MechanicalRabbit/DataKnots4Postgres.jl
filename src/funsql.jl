@@ -33,6 +33,8 @@ end
 mutable struct Unit <: SQLClause
 end
 
+
+
 mutable struct From <: SQLClause
     tbl::Table
 end
@@ -41,8 +43,8 @@ mutable struct Select <: SQLClause
     base::SQLClause
     list::Vector{Pair{Symbol,SQLValue}}
 
-    Select(base; pairs...) =
-        new(base, collect(Pair{Symbol,SQLValue}, pairs))
+    Select(base, pairs...) =
+        new(base, Pair{Symbol,SQLValue}[default_alias(p) for p in pairs])
 end
 
 mutable struct Where <: SQLClause
@@ -52,8 +54,26 @@ end
 
 mutable struct Join <: SQLClause
     left::SQLClause
+    left_name::Union{Symbol,Nothing}
     right::SQLClause
+    right_name::Union{Symbol,Nothing}
     on::SQLValue
+
+    function Join(left, right, on)
+        if left isa SQLClause
+            left_name = nothing
+        else
+            left_name = first(left)
+            left = last(left)
+        end
+        if right isa SQLClause
+            right_name = nothing
+        else
+            right_name = first(right)
+            right = last(right)
+        end
+        new(left, left_name, right, right_name, on)
+    end
 end
 
 struct Pick <: SQLValue
@@ -134,9 +154,22 @@ end
 
 function pick(c::Join, s::Symbol, default)
     left = getfield(c, :left)
+    left_name = getfield(c, :left_name)
     right = getfield(c, :right)
-    val = pick(left, s, nothing)
-    val !== nothing ? val : pick(right, s, default)
+    right_name = getfield(c, :right_name)
+    if s === left_name
+        return left
+    elseif s === right_name
+        return right
+    end
+    val = nothing
+    if left_name === nothing
+        val = pick(left, s, nothing)
+    end
+    if val === nothing && right_name === nothing
+        val = pick(right, s, nothing)
+    end
+    val !== nothing ? val : default
 end
 
 default_list(@nospecialize ::SQLClause) = SQLValue[]
@@ -153,6 +186,14 @@ default_list(c::Where) =
 default_list(c::Join) =
     vcat(default_list(getfield(c, :left)), default_list(getfield(c, :right)))
 
+default_alias(p::Pair) = p
+
+default_alias(v::Pick) = v.field => v
+
+default_alias(v::Const) = Symbol(v.val) => v
+
+default_alias(v::Op) = v.op => v
+
 function normalize(@nospecialize c::SQLClause)
     c′, repl = normalize(c, default_list(c))
     c′
@@ -164,7 +205,7 @@ function normalize(c::Select, refs)
     base_refs = collect_refs(list)
     base′, base_repl = normalize(base, base_refs)
     list′ = replace_refs(list, base_repl)
-    c′ = Select(base′; list′...)
+    c′ = Select(base′, list′...)
     repl = Dict{SQLValue,SQLValue}()
     for key in keys(refs)
         if key isa Pick && key.alias === c

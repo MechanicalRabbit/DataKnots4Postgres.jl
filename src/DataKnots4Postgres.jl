@@ -783,7 +783,7 @@ function make_sql(bundle)
     for (alias, col) in columns
         push!(list, Symbol(col.name) => pick(alias_to_from[alias], Symbol(col.name)))
     end
-    select = Select(j; list...)
+    select = Select(j, list...)
     return normalize(select), columns
 end
 
