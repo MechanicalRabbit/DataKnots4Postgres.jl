@@ -8,13 +8,16 @@ struct Table
     cols::Vector{Symbol}
 end
 
+Table(tbl::PGTable) =
+    Table(Symbol(tbl.schema.name), Symbol(tbl.name), Symbol[Symbol(col.name) for col in tbl])
+
 abstract type SQLClause end
 
 Base.getproperty(c::SQLClause, attr::Symbol) =
-    Pick(c, attr)
+    pick(c, attr)
 
 Base.getproperty(c::SQLClause, attr::String) =
-    Pick(c, Symbol(attr))
+    pick(c, Symbol(attr))
 
 abstract type SQLValue end
 
@@ -107,6 +110,34 @@ replace_refs(v::Const, repl) =
 
 replace_refs(list::Vector{Pair{Symbol,SQLValue}}, repl) =
     Pair{Symbol,SQLValue}[alias => replace_refs(v, repl) for (alias, v) in list]
+
+function pick(@nospecialize(c::SQLClause), s::Symbol)
+    val = pick(c, s, nothing)
+    val !== nothing || error("cannot found $c")
+    val
+end
+
+function pick(c::From, s::Symbol, default)
+    tbl = getfield(c, :tbl)
+    s in tbl.cols ? Pick(c, s) : default
+end
+
+function pick(c::Select, s::Symbol, default)
+    list = getfield(c, :list)
+    findfirst(p -> first(p) === s, list) !== nothing ? Pick(c, s) : default
+end
+
+function pick(c::Where, s::Symbol, default)
+    base = getfield(c, :base)
+    pick(base, s, default)
+end
+
+function pick(c::Join, s::Symbol, default)
+    left = getfield(c, :left)
+    right = getfield(c, :right)
+    val = pick(left, s, nothing)
+    val !== nothing ? val : pick(right, s, default)
+end
 
 default_list(@nospecialize ::SQLClause) = SQLValue[]
 

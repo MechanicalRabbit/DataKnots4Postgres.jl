@@ -738,7 +738,7 @@ end
 
 function make_joins(join, alias, alias_to_from)
     on = alias.on
-    tbl = Table(Symbol(alias.tbl.schema.name), Symbol(alias.tbl.name), Symbol[])
+    tbl = Table(alias.tbl)
     from = From(tbl)
     alias_to_from[alias] = from
     if alias.parent === nothing
@@ -748,7 +748,7 @@ function make_joins(join, alias, alias_to_from)
         parent_from = alias_to_from[alias.parent]
         args = SQLValue[]
         for col in on.columns
-            push!(args, Op(:(=), Pick(parent_from, Symbol(col.name)), Pick(from, Symbol(col.name))))
+            push!(args, Op(:(=), pick(parent_from, Symbol(col.name)), pick(from, Symbol(col.name))))
         end
         pred = Op(:(&&), args...)
         join = Join(join, from, pred)
@@ -756,7 +756,7 @@ function make_joins(join, alias, alias_to_from)
         parent_from = alias_to_from[alias.parent]
         args = SQLValue[]
         for (col1, col2) in zip(on.columns, on.target_columns)
-            push!(args, Op(:(=), Pick(parent_from, Symbol(col1.name)), Pick(from, Symbol(col2.name))))
+            push!(args, Op(:(=), pick(parent_from, Symbol(col1.name)), pick(from, Symbol(col2.name))))
         end
         pred = Op(:(&&), args...)
         join = Join(join, from, pred)
@@ -767,7 +767,7 @@ function make_joins(join, alias, alias_to_from)
     if alias.parent === nothing && on isa Vector{PGColumn}
         args = SQLValue[]
         for (k, col) in enumerate(on)
-            push!(args, Op(:(=), Pick(from, Symbol(col.name)), Op(:placeholder, Const(k))))
+            push!(args, Op(:(=), pick(from, Symbol(col.name)), Op(:placeholder, Const(k))))
         end
         pred = Op(:(&&), args...)
         join = Where(join, pred)
@@ -781,7 +781,7 @@ function make_sql(bundle)
     j = make_joins(nothing, bundle.root, alias_to_from)
     list = Pair{Symbol,SQLValue}[]
     for (alias, col) in columns
-        push!(list, Symbol(col.name) => Pick(alias_to_from[alias], Symbol(col.name)))
+        push!(list, Symbol(col.name) => pick(alias_to_from[alias], Symbol(col.name)))
     end
     select = Select(j; list...)
     return normalize(select), columns
