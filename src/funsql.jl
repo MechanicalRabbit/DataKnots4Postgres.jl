@@ -33,8 +33,6 @@ end
 mutable struct Unit <: SQLClause
 end
 
-
-
 mutable struct From <: SQLClause
     tbl::Table
 end
@@ -76,6 +74,14 @@ mutable struct Join <: SQLClause
     end
 end
 
+mutable struct Group <: SQLClause
+    base::SQLClause
+    list::Vector{Pair{Symbol,SQLValue}}
+
+    Group(base, pairs...) =
+        new(base, Pair{Symbol,SQLValue}[default_alias(p) for p in pairs])
+end
+
 struct Pick <: SQLValue
     alias::SQLClause
     field::Symbol
@@ -93,6 +99,23 @@ struct Const <: SQLValue
     val
 end
 
+abstract type SQLAggregate <: SQLValue end
+
+struct Count <: SQLAggregate
+    over::SQLClause
+
+    Count(; over::SQLClause) =
+        new(over)
+end
+
+struct Max <: SQLAggregate
+    val::SQLValue
+    over::SQLClause
+
+    Max(val; over::SQLClause) =
+        new(val, over)
+end
+
 function collect_refs!(v::Pick, refs)
     push!(refs, v)
     nothing
@@ -104,14 +127,19 @@ function collect_refs!(v::Op, refs)
     end
 end
 
+collect_refs!(::Const, refs) =
+    nothing
+
+function collect_refs!(a::SQLAggregate, refs)
+    push!(refs, a)
+    nothing
+end
+
 function collect_refs(@nospecialize v)
     refs = Set{SQLValue}()
     collect_refs!(v, refs)
     refs
 end
-
-collect_refs!(::Const, refs) =
-    nothing
 
 function collect_refs!(list::Vector{Pair{Symbol,SQLValue}}, refs)
     for (alias, v) in list
@@ -119,7 +147,7 @@ function collect_refs!(list::Vector{Pair{Symbol,SQLValue}}, refs)
     end
 end
 
-replace_refs(v::Pick, repl) =
+replace_refs(v::Union{Pick,SQLAggregate}, repl) =
     get(repl, v, v)
 
 replace_refs(v::Op, repl) =
@@ -172,6 +200,12 @@ function pick(c::Join, s::Symbol, default)
     val !== nothing ? val : default
 end
 
+function pick(c::Group, s::Symbol, default)
+    base = getfield(c, :base)
+    list = getfield(c, :list)
+    findfirst(p -> first(p) === s, list) !== nothing ? Pick(c, s) : pick(base, s, default)
+end
+
 default_list(@nospecialize ::SQLClause) = SQLValue[]
 
 default_list(c::From) =
@@ -186,6 +220,9 @@ default_list(c::Where) =
 default_list(c::Join) =
     vcat(default_list(getfield(c, :left)), default_list(getfield(c, :right)))
 
+default_list(c::Group) =
+    SQLValue[Pick(c, alias) for (alias, v) in getfield(c, :list)]
+
 default_alias(p::Pair) = p
 
 default_alias(v::Pick) = v.field => v
@@ -193,6 +230,10 @@ default_alias(v::Pick) = v.field => v
 default_alias(v::Const) = Symbol(v.val) => v
 
 default_alias(v::Op) = v.op => v
+
+default_alias(v::Count) = :count => v
+
+default_alias(v::Max) = :max => v
 
 function normalize(@nospecialize c::SQLClause)
     c′, repl = normalize(c, default_list(c))
@@ -282,8 +323,55 @@ function normalize(c::From, refs)
     s, repl
 end
 
+function normalize(c::Group, refs)
+    base = getfield(c, :base)
+    list = getfield(c, :list)
+    base_refs = collect_refs(list)
+    for ref in refs
+        if ref isa Max && ref.over === c
+            max_refs = collect_refs(ref.val)
+            for ref in max_refs
+                push!(base_refs, ref)
+            end
+        end
+    end
+    base′, base_repl = normalize(base, base_refs)
+    list′ = replace_refs(list, base_repl)
+    c′ = Group(base′, [Const(k) for k = 1:length(list)]...)
+    s = Select(c′, list′...)
+    list′ = getfield(s, :list)
+    repl = Dict{SQLValue,SQLValue}()
+    pos = 0
+    for key in refs
+        if key isa Pick && key.alias === c
+            pos += 1
+            repl[key] = Pick(s, key.field)
+        elseif key isa Count && key.over === c
+            pos += 1
+            field = Symbol("_", pos)
+            repl[key] = Pick(s, field)
+            push!(list′, field => Count(over=c′))
+        elseif key isa Max && key.over === c
+            pos += 1
+            field = Symbol("_", pos)
+            repl[key] = Pick(s, field)
+            push!(list′, field => Max(replace_refs(key.val, base_repl), over=c′))
+        end
+    end
+    s, repl
+end
+
 to_sql!(ctx, v::Const) =
     to_sql!(ctx, v.val)
+
+to_sql!(ctx, ::Count) =
+    print(ctx, "COUNT(TRUE)")
+
+function to_sql!(ctx, v::Max)
+    print(ctx, "MAX(")
+    to_sql!(ctx, v.val)
+    print(ctx, ")")
+end
 
 to_sql!(ctx, v::Pick) =
     to_sql!(ctx, (ctx.aliases[v.alias], v.field))
@@ -385,6 +473,26 @@ function to_sql!(ctx, c::Select)
     end
 end
 
+function to_sql!(ctx, c::Group)
+    base = getfield(c, :base)
+    list = getfield(c, :list)
+    print(ctx, " FROM (")
+    to_sql!(ctx, base)
+    print(ctx, ") AS ")
+    to_sql!(ctx, ctx.aliases[base])
+    print(ctx, " GROUP BY")
+    first = true
+    for (alias, val) in list
+        if first
+            print(ctx, ' ')
+            first = false
+        else
+            print(ctx, ", ")
+        end
+        to_sql!(ctx, val)
+    end
+end
+
 function populate_aliases!(ctx, c::Select)
     base = getfield(c, :base)
     ctx.aliases[c] = gensym()
@@ -404,6 +512,11 @@ function populate_aliases!(ctx, c::Join)
     right = getfield(c, :right)
     populate_aliases!(ctx, left)
     populate_aliases!(ctx, right)
+end
+
+function populate_aliases!(ctx, c::Group)
+    base = getfield(c, :base)
+    populate_aliases!(ctx, base)
 end
 
 mutable struct ToSQLContext <: IO
