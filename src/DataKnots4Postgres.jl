@@ -738,7 +738,7 @@ end
 
 function make_joins(join, alias, alias_to_from)
     on = alias.on
-    tbl = Table(alias.tbl)
+    tbl = SQLTable(alias.tbl)
     from = From(tbl)
     alias_to_from[alias] = from
     if alias.parent === nothing
@@ -777,7 +777,7 @@ end
 
 function make_sql(bundle)
     columns = make_columns(bundle)
-    alias_to_from = Dict{SQLAlias,SQLClause}()
+    alias_to_from = Dict{SQLAlias,SQLQuery}()
     j = make_joins(nothing, bundle.root, alias_to_from)
     list = Pair{Symbol,SQLExpr}[]
     for (alias, col) in columns

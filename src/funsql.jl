@@ -2,22 +2,60 @@
 # DSL for assembling SQL queries.
 #
 
-struct Table
+# SQL Catalog
+
+struct SQLTable
     scm::Symbol
     name::Symbol
     cols::Vector{Symbol}
 end
 
-Table(tbl::PGTable) =
-    Table(Symbol(tbl.schema.name), Symbol(tbl.name), Symbol[Symbol(col.name) for col in tbl])
+SQLTable(tbl::PGTable) =
+    SQLTable(Symbol(tbl.schema.name), Symbol(tbl.name), Symbol[Symbol(col.name) for col in tbl])
 
-abstract type SQLClause end
+# Queries
 
-Base.getproperty(c::SQLClause, attr::Symbol) =
-    pick(c, attr)
+abstract type SQLQueryKind end
 
-Base.getproperty(c::SQLClause, attr::String) =
-    pick(c, Symbol(attr))
+struct SQLQuery
+    kind::SQLQueryKind
+    args::Vector{SQLQuery}
+end
+
+struct TransparentSQLQuery{K}
+    kind::K
+    args::Vector{SQLQuery}
+end
+
+transparent(q::SQLQuery) =
+    TransparentSQLQuery(getfield(q, :kind), getfield(q, :args))
+
+opaque(q::TransparentSQLQuery) =
+    SQLQuery(q.kind, q.args)
+
+const EMPTY_SQLQUERY_VECTOR = SQLQuery[]
+
+SQLQuery(kind::SQLQueryKind) =
+    SQLQuery(kind, EMPTY_SQLQUERY_VECTOR)
+
+SQLQuery(kind::SQLQueryKind, arg::SQLQuery) =
+    SQLQuery(kind, [arg])
+
+struct SQLQueryClosure
+    kind::SQLQueryKind
+    args::Vector{SQLQuery}
+end
+
+SQLQueryClosure(kind::SQLQueryKind) =
+    SQLQueryClosure(kind, EMPTY_SQLQUERY_VECTOR)
+
+SQLQueryClosure(kind::SQLQueryKind, arg::SQLQuery) =
+    SQLQueryClosure(kind, [arg])
+
+(c::SQLQueryClosure)(q::SQLQuery) =
+    SQLQuery(c.kind, [q, c.args...])
+
+# Expressions
 
 abstract type SQLExprKind end
 
@@ -31,57 +69,110 @@ const EMPTY_SQLEXPR_VECTOR = SQLExpr[]
 SQLExpr(kind) =
     SQLExpr(kind, EMPTY_SQLEXPR_VECTOR)
 
-mutable struct Unit <: SQLClause
+# Query kinds
+
+# Unit
+
+mutable struct UnitKind <: SQLQueryKind
 end
 
-mutable struct From <: SQLClause
-    tbl::Table
+Unit() = SQLQuery(UnitKind())
+
+# From
+
+mutable struct FromKind <: SQLQueryKind
+    tbl::SQLTable
 end
 
-mutable struct Select <: SQLClause
-    base::SQLClause
+From(tbl::SQLTable) =
+    SQLQuery(FromKind(tbl))
+
+# Select
+
+mutable struct SelectKind <: SQLQueryKind
     list::Vector{Pair{Symbol,SQLExpr}}
-
-    Select(base, pairs...) =
-        new(base, Pair{Symbol,SQLExpr}[default_alias(p) for p in pairs])
 end
 
-mutable struct Where <: SQLClause
-    base::SQLClause
+Select(q::SQLQuery, list::Vector{Pair{Symbol,SQLExpr}}) =
+    SQLQuery(SelectKind(list), q)
+
+Select(list::Vector{Pair{Symbol,SQLExpr}}) =
+    SQLQueryClosure(SelectKind(list))
+
+Select(q::SQLQuery, list...) =
+    Select(q, default_alias(list))
+
+Select(list...) =
+    Select(default_alias(list))
+
+# Where
+
+mutable struct WhereKind <: SQLQueryKind
     pred::SQLExpr
 end
 
-mutable struct Join <: SQLClause
-    left::SQLClause
+Where(q::SQLQuery, pred::SQLExpr) =
+    SQLQuery(WhereKind(pred), q)
+
+Where(pred::SQLExpr) =
+    SQLQueryClosure(WhereKind(pred))
+
+# Join
+
+mutable struct JoinKind <: SQLQueryKind
     left_name::Union{Symbol,Nothing}
-    right::SQLClause
     right_name::Union{Symbol,Nothing}
     on::SQLExpr
+end
 
-    function Join(left, right, on)
-        if left isa SQLClause
-            left_name = nothing
-        else
-            left_name = first(left)
-            left = last(left)
-        end
-        if right isa SQLClause
-            right_name = nothing
-        else
-            right_name = first(right)
-            right = last(right)
-        end
-        new(left, left_name, right, right_name, on)
+function Join(left::Union{Pair{Symbol,SQLQuery},SQLQuery},
+              right::Union{Pair{Symbol,SQLQuery},SQLQuery},
+              on::SQLExpr)
+    if left isa SQLQuery
+        left_name = nothing
+    else
+        left_name = first(left)
+        left = last(left)
     end
+    if right isa SQLQuery
+        right_name = nothing
+    else
+        right_name = first(right)
+        right = last(right)
+    end
+    SQLQuery(JoinKind(left_name, right_name, on), [left, right])
 end
 
-mutable struct Group <: SQLClause
-    base::SQLClause
+function Join(right::Union{Pair{Symbol,SQLQuery},SQLQuery},
+              on::SQLExpr)
+    if right isa SQLQuery
+        right_name = nothing
+    else
+        right_name = first(right)
+        right = last(right)
+    end
+    SQLQueryClosure(JoinKind(nothing, right_name, on), [right])
+end
+
+# Group
+
+mutable struct GroupKind <: SQLQueryKind
     list::Vector{Pair{Symbol,SQLExpr}}
-
-    Group(base, pairs...) =
-        new(base, Pair{Symbol,SQLExpr}[default_alias(p) for p in pairs])
 end
+
+Group(q::SQLQuery, list::Vector{Pair{Symbol,SQLExpr}}) =
+    SQLQuery(GroupKind(list), q)
+
+Group(list::Vector{Pair{Symbol,SQLExpr}}) =
+    SQLQueryClosure(GroupKind(list))
+
+Group(q::SQLQuery, list...) =
+    Group(q, default_alias(list))
+
+Group(list...) =
+    Group(default_alias(list))
+
+# Expressions
 
 struct ConstKind{T} <: SQLExprKind
     val::T
@@ -89,15 +180,53 @@ end
 
 struct PickKind <: SQLExprKind
     field::Symbol
-    over::SQLClause
+    over::SQLQuery
 end
 
 struct OpKind{S} <: SQLExprKind
 end
 
+struct AggregateKind{S} <: SQLExprKind
+    over::SQLQuery
+end
+
 struct PlaceholderKind <: SQLExprKind
     pos::Int
 end
+
+
+#=
+abstract type SQLExpr end
+
+struct Const{T} <: SQLExpr
+    val::T
+end
+
+struct Pick <: SQLExpr
+    field::Symbol
+    over::SQLQuery
+end
+
+struct Op{S} <: SQLExpr
+    args::Vector{SQLExpr}
+end
+
+struct Aggregate{S} <: SQLExpr
+    over::SQLQuery
+    args::Vector{SQLExpr}
+end
+
+struct Placeholder <: SQLExpr
+    pos::Int
+end
+
+Base.iterate(::SQLExpr) =
+    nothing
+
+Base.iterate(ex::Union{Op,Aggregate}, state=1) =
+    iterate(ex.args, state)
+=#
+
 
 #=
 struct OpLookup
@@ -118,9 +247,17 @@ to_sql(ctx, ::PostresDialect, ::OpKind{:CONCAT}, args) =
     print(ctx, "args[1] || args[2]")
 =#
 
-struct AggregateKind{S} <: SQLExprKind
-    over::SQLClause
-end
+Base.getindex(q::SQLQuery, attr::Symbol) =
+    pick(q, attr)
+
+Base.getindex(q::SQLQuery, attr::String) =
+    pick(q, Symbol(attr))
+
+Base.getproperty(q::SQLQuery, attr::Symbol) =
+    pick(q, attr)
+
+Base.getproperty(q::SQLQuery, attr::String) =
+    pick(q, Symbol(attr))
 
 operation_name(kind::OpKind{S}) where {S} =
     S
@@ -131,16 +268,19 @@ operation_name(kind::AggregateKind{S}) where {S} =
 Const(val::T) where {T} =
     SQLExpr(ConstKind{T}(val))
 
-Pick(over, field) =
+Pick(over::SQLQuery, field) =
     SQLExpr(PickKind(field, over))
+
+Pick(kind::SQLQueryKind, args::Vector{SQLQuery}, field) =
+    Pick(SQLQuery(kind, args), field)
 
 Op(op, args...) =
     SQLExpr(OpKind{op}(), SQLExpr[args...])
 
-Count(; over::SQLClause) =
+Count(; over::SQLQuery) =
     SQLExpr(AggregateKind{:COUNT}(over))
 
-Max(val; over::SQLClause) =
+Max(val; over::SQLQuery) =
     SQLExpr(AggregateKind{:MAX}(over), SQLExpr[val])
 
 Placeholder(pos) =
@@ -185,69 +325,103 @@ end
 replace_refs(exs::Vector{SQLExpr}, repl) =
     SQLExpr[replace_refs(ex, repl) for ex in exs]
 
-function pick(@nospecialize(c::SQLClause), s::Symbol)
-    val = pick(c, s, nothing)
-    val !== nothing || error("cannot found $c")
+function pick(q::SQLQuery, s::Symbol)
+    val = pick(q, s, nothing)
+    val !== nothing || error("cannot found $s")
     val
 end
 
-function pick(c::From, s::Symbol, default)
-    tbl = getfield(c, :tbl)
-    s in tbl.cols ? Pick(c, s) : default
+function pick(q::SQLQuery, s::Symbol, default)
+    kind = getfield(q, :kind)
+    args = getfield(q, :args)
+    pick(kind, args, s, default)
 end
 
-function pick(c::Select, s::Symbol, default)
-    list = getfield(c, :list)
-    findfirst(p -> first(p) === s, list) !== nothing ? Pick(c, s) : default
+pick(kind::SQLQueryKind, args, s, default) =
+    default
+
+function pick(kind::FromKind, args, s, default)
+    s in kind.tbl.cols ? Pick(kind, args, s) : default
 end
 
-function pick(c::Where, s::Symbol, default)
-    base = getfield(c, :base)
+function pick(kind::SelectKind, args, s, default)
+    findfirst(p -> first(p) === s, kind.list) !== nothing ? Pick(kind, args, s) : default
+end
+
+function pick(kind::WhereKind, args, s, default)
+    base, = args
     pick(base, s, default)
 end
 
-function pick(c::Join, s::Symbol, default)
-    left = getfield(c, :left)
-    left_name = getfield(c, :left_name)
-    right = getfield(c, :right)
-    right_name = getfield(c, :right_name)
-    if s === left_name
+function pick(kind::JoinKind, args, s, default)
+    left, right = args
+    if s === kind.left_name
         return left
-    elseif s === right_name
+    elseif s === kind.right_name
         return right
     end
     val = nothing
-    if left_name === nothing
+    if kind.left_name === nothing
         val = pick(left, s, nothing)
     end
-    if val === nothing && right_name === nothing
+    if val === nothing && kind.right_name === nothing
         val = pick(right, s, nothing)
     end
     val !== nothing ? val : default
 end
 
-function pick(c::Group, s::Symbol, default)
-    base = getfield(c, :base)
-    list = getfield(c, :list)
-    findfirst(p -> first(p) === s, list) !== nothing ? Pick(c, s) : pick(base, s, default)
+function pick(kind::GroupKind, args, s, default)
+    base, = args
+    findfirst(p -> first(p) === s, kind.list) !== nothing ? Pick(kind, args, s) : pick(base, s, default)
 end
 
-default_list(@nospecialize ::SQLClause) = SQLExpr[]
+default_list(q::SQLQuery) =
+    default_list(getfield(q, :kind), getfield(q, :args))
 
-default_list(c::From) =
-    SQLExpr[Pick(c, col) for col in getfield(c, :tbl).cols]
+default_list(::SQLQueryKind, args) =
+    SQLExpr[]
 
-default_list(c::Select) =
-    SQLExpr[Pick(c, alias) for (alias, v) in getfield(c, :list)]
+default_list(kind::FromKind, args) =
+    SQLExpr[Pick(kind, args, col) for col in kind.tbl.cols]
 
-default_list(c::Where) =
-    default_list(getfield(c, :base))
+default_list(kind::SelectKind, args) =
+    SQLExpr[Pick(kind, args, alias) for (alias, v) in kind.list]
 
-default_list(c::Join) =
-    vcat(default_list(getfield(c, :left)), default_list(getfield(c, :right)))
+function default_list(kind::WhereKind, args)
+    base, = args
+    default_list(base)
+end
 
-default_list(c::Group) =
-    SQLExpr[Pick(c, alias) for (alias, v) in getfield(c, :list)]
+function default_list(kind::JoinKind, args)
+    #=
+    left, right = args
+    SQLExpr[default_list(left)..., default_list(right)...]
+    =#
+    left, right = args
+    list = SQLExpr[]
+    if kind.left_name === nothing
+        append!(list, default_list(left))
+    end
+    if kind.right_name === nothing
+        append!(list, default_list(right))
+    end
+    list
+end
+
+default_list(kind::GroupKind, args) =
+    SQLExpr[Pick(kind, args, alias) for (alias, v) in kind.list]
+
+function default_alias(@nospecialize list)
+    list′ = Pair{Symbol,SQLExpr}[]
+    seen = Set{Symbol}()
+    for p in list
+        p′= default_alias(p)
+        !(first(p′) in seen) || error("duplicate alias $(first(p′))")
+        push!(list′, p′)
+        push!(seen, first(p′))
+    end
+    list′
+end
 
 default_alias(p::Pair) = p
 
@@ -266,40 +440,41 @@ default_alias(kind::OpKind{S}) where {S} =
 default_alias(kind::AggregateKind{S}) where {S} =
     S
 
-function normalize(@nospecialize c::SQLClause)
-    c′, repl = normalize(c, default_list(c))
-    c′
+function normalize(q::SQLQuery)
+    q′, repl = normalize(q, default_list(q))
+    q′
 end
 
-function normalize(c::Select, refs)
-    base = getfield(c, :base)
-    list = getfield(c, :list)
-    base_refs = collect_refs(list)
+normalize(q::SQLQuery, refs) =
+    normalize(getfield(q, :kind), getfield(q, :args), refs)
+
+function normalize(kind::SelectKind, args, refs)
+    base, = args
+    base_refs = collect_refs(kind.list)
     base′, base_repl = normalize(base, base_refs)
-    list′ = replace_refs(list, base_repl)
-    c′ = Select(base′, list′...)
+    list′ = replace_refs(kind.list, base_repl)
+    c′ = Select(base′, list′)
     repl = Dict{SQLExpr,SQLExpr}()
     for ref in refs
-        kind = ref.kind
-        if kind isa PickKind && kind.over === c
-            repl[ref] = Pick(c′, kind.field)
+        ref_kind = ref.kind
+        if ref_kind isa PickKind && getfield(ref_kind.over, :kind) === kind
+            repl[ref] = Pick(c′, ref_kind.field)
         end
     end
     c′, repl
 end
 
-function normalize(c::Where, refs)
-    base = getfield(c, :base)
-    pred = getfield(c, :pred)
-    base_refs = collect_refs(pred)
+function normalize(kind::WhereKind, args, refs)
+    base, = args
+    base_refs = collect_refs(kind.pred)
     for ref in refs
         push!(base_refs, ref)
     end
     base′, base_repl = normalize(base, base_refs)
-    pred′ = replace_refs(pred, base_repl)
+    pred′ = replace_refs(kind.pred, base_repl)
     c′ = Where(base′, pred′)
-    s = Select(c′)
-    list = getfield(s, :list)
+    list = Pair{Symbol,SQLExpr}[]
+    s = Select(c′, list)
     repl = Dict{SQLExpr,SQLExpr}()
     pos = 0
     for ref in refs
@@ -313,21 +488,19 @@ function normalize(c::Where, refs)
     s, repl
 end
 
-function normalize(c::Join, refs)
-    left = getfield(c, :left)
-    right = getfield(c, :right)
-    on = getfield(c, :on)
-    all_refs = collect_refs(on)
+function normalize(kind::JoinKind, args, refs)
+    left, right = args
+    all_refs = collect_refs(kind.on)
     for ref in refs
         push!(all_refs, ref)
     end
     left′, left_repl = normalize(left, all_refs)
     right′, right_repl = normalize(right, all_refs)
     all_repl = merge(left_repl, right_repl)
-    on′ = replace_refs(on, all_repl)
+    on′ = replace_refs(kind.on, all_repl)
     c′ = Join(left′, right′, on′)
-    s = Select(c′)
-    list = getfield(s, :list)
+    list = Pair{Symbol,SQLExpr}[]
+    s = Select(c′, list)
     repl = Dict{SQLExpr,SQLExpr}()
     pos = 0
     for ref in refs
@@ -341,14 +514,14 @@ function normalize(c::Join, refs)
     s, repl
 end
 
-function normalize(c::From, refs)
-    s = Select(c)
-    list = getfield(s, :list)
+function normalize(kind::FromKind, args, refs)
+    list = Pair{Symbol,SQLExpr}[]
+    s = Select(SQLQuery(kind, args), list)
     repl = Dict{SQLExpr,SQLExpr}()
     for ref in refs
-        kind = ref.kind
-        if kind isa PickKind && kind.over === c
-            field = kind.field
+        ref_kind = ref.kind
+        if ref_kind isa PickKind && getfield(ref_kind.over, :kind) === kind
+            field = ref_kind.field
             repl[ref] = Pick(s, field)
             push!(list, field => Const(field))
         end
@@ -356,38 +529,39 @@ function normalize(c::From, refs)
     s, repl
 end
 
-function normalize(c::Group, refs)
-    base = getfield(c, :base)
-    list = getfield(c, :list)
-    base_refs = collect_refs(list)
+function normalize(kind::GroupKind, args, refs)
+    base, = args
+    base_refs = collect_refs(kind.list)
     for ref in refs
-        kind = ref.kind
-        if kind isa AggregateKind && kind.over === c
+        ref_kind = ref.kind
+        if ref_kind isa AggregateKind && getfield(ref_kind.over, :kind) === kind
             collect_refs!(ref.args, base_refs)
         end
     end
     base′, base_repl = normalize(base, base_refs)
-    list′ = replace_refs(list, base_repl)
-    c′ = Group(base′, [Const(k) for k = 1:length(list)]...)
-    s = Select(c′, list′...)
-    list′ = getfield(s, :list)
+    list′ = replace_refs(kind.list, base_repl)
+    c′ = Group(base′, Pair{Symbol,SQLExpr}[Symbol("_", k) => Const(k) for k = 1:length(kind.list)])
+    s = Select(c′, list′)
     repl = Dict{SQLExpr,SQLExpr}()
     pos = 0
     for ref in refs
-        kind = ref.kind
-        if kind isa PickKind && kind.over === c
+        ref_kind = ref.kind
+        if ref_kind isa PickKind && getfield(ref_kind.over, :kind) === kind
             pos += 1
-            repl[ref] = Pick(s, kind.field)
-        elseif kind isa AggregateKind && kind.over === c
+            repl[ref] = Pick(s, ref_kind.field)
+        elseif ref_kind isa AggregateKind && getfield(ref_kind.over, :kind) === kind
             pos += 1
             field = Symbol("_", pos)
             repl[ref] = Pick(s, field)
-            kind′ = AggregateKind{operation_name(kind)}(c′)
+            kind′ = AggregateKind{operation_name(ref_kind)}(c′)
             push!(list′, field => SQLExpr(kind′, replace_refs(ref.args, base_repl)))
         end
     end
     s, repl
 end
+
+to_sql!(ctx, q::SQLQuery) =
+    to_sql!(ctx, getfield(q, :kind), getfield(q, :args))
 
 to_sql!(ctx, ex::SQLExpr) =
     to_sql!(ctx, ex.kind, ex.args)
@@ -442,30 +616,27 @@ function to_sql!(ctx, kind::PlaceholderKind, args)
     to_sql!(ctx, kind.pos)
 end
 
-function to_sql!(ctx, c::From)
-    tbl = getfield(c, :tbl)
+function to_sql!(ctx, kind::FromKind, args)
+    tbl = kind.tbl
     print(ctx, " FROM ")
     to_sql!(ctx, (tbl.scm, tbl.name))
 end
 
-function to_sql!(ctx, ::Unit)
+function to_sql!(ctx, ::UnitKind, args)
 end
 
-function to_sql!(ctx, c::Where)
-    base = getfield(c, :base)
-    pred = getfield(c, :pred)
+function to_sql!(ctx, kind::WhereKind, args)
+    base, = args
     print(ctx, " FROM (")
     to_sql!(ctx, base)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[base])
     print(ctx, " WHERE ")
-    to_sql!(ctx, pred)
+    to_sql!(ctx, kind.pred)
 end
 
-function to_sql!(ctx, c::Join)
-    left = getfield(c, :left)
-    right = getfield(c, :right)
-    on = getfield(c, :on)
+function to_sql!(ctx, kind::JoinKind, args)
+    left, right = args
     print(ctx, " FROM (")
     to_sql!(ctx, left)
     print(ctx, ") AS ")
@@ -475,19 +646,18 @@ function to_sql!(ctx, c::Join)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[right])
     print(ctx, " ON (")
-    to_sql!(ctx, on)
+    to_sql!(ctx, kind.on)
     print(ctx, ")")
 end
 
-function to_sql!(ctx, c::Select)
-    base = getfield(c, :base)
-    list = getfield(c, :list)
+function to_sql!(ctx, kind::SelectKind, args)
+    base, = args
     if isempty(ctx.aliases)
-        populate_aliases!(ctx, c)
+        populate_aliases!(ctx, args)
     end
     print(ctx, "SELECT")
     first = true
-    for (alias, val) in list
+    for (alias, val) in kind.list
         if first
             print(ctx, ' ')
             first = false
@@ -498,7 +668,7 @@ function to_sql!(ctx, c::Select)
         print(ctx, " AS ")
         to_sql!(ctx, alias)
     end
-    if base isa Select
+    if getfield(base, :kind) isa SelectKind
         print(ctx, " FROM (")
         to_sql!(ctx, base)
         print(ctx, ") AS ")
@@ -508,16 +678,15 @@ function to_sql!(ctx, c::Select)
     end
 end
 
-function to_sql!(ctx, c::Group)
-    base = getfield(c, :base)
-    list = getfield(c, :list)
+function to_sql!(ctx, kind::GroupKind, args)
+    base, = args
     print(ctx, " FROM (")
     to_sql!(ctx, base)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[base])
     print(ctx, " GROUP BY")
     first = true
-    for (alias, val) in list
+    for (alias, val) in kind.list
         if first
             print(ctx, ' ')
             first = false
@@ -528,30 +697,18 @@ function to_sql!(ctx, c::Group)
     end
 end
 
-function populate_aliases!(ctx, c::Select)
-    base = getfield(c, :base)
-    ctx.aliases[c] = gensym()
-    populate_aliases!(ctx, base)
+function populate_aliases!(ctx, qs::Vector{SQLQuery})
+    for q in qs
+        populate_aliases!(ctx, q)
+    end
 end
 
-function populate_aliases!(ctx, ::Union{From,Unit})
-end
-
-function populate_aliases!(ctx, c::Where)
-    base = getfield(c, :base)
-    populate_aliases!(ctx, base)
-end
-
-function populate_aliases!(ctx, c::Join)
-    left = getfield(c, :left)
-    right = getfield(c, :right)
-    populate_aliases!(ctx, left)
-    populate_aliases!(ctx, right)
-end
-
-function populate_aliases!(ctx, c::Group)
-    base = getfield(c, :base)
-    populate_aliases!(ctx, base)
+function populate_aliases!(ctx, q::SQLQuery)
+    base_kind = getfield(q, :kind)
+    if base_kind isa SelectKind
+        ctx.aliases[q] = gensym()
+    end
+    populate_aliases!(ctx, getfield(q, :args))
 end
 
 mutable struct ToSQLContext <: IO
