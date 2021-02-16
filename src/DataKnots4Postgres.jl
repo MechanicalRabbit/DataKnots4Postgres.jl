@@ -746,7 +746,7 @@ function make_joins(join, alias, alias_to_from)
         join = from
     elseif on isa PGUniqueKey
         parent_from = alias_to_from[alias.parent]
-        args = SQLValue[]
+        args = SQLExpr[]
         for col in on.columns
             push!(args, Op(:(=), pick(parent_from, Symbol(col.name)), pick(from, Symbol(col.name))))
         end
@@ -754,7 +754,7 @@ function make_joins(join, alias, alias_to_from)
         join = Join(join, from, pred)
     elseif on isa PGForeignKey
         parent_from = alias_to_from[alias.parent]
-        args = SQLValue[]
+        args = SQLExpr[]
         for (col1, col2) in zip(on.columns, on.target_columns)
             push!(args, Op(:(=), pick(parent_from, Symbol(col1.name)), pick(from, Symbol(col2.name))))
         end
@@ -765,9 +765,9 @@ function make_joins(join, alias, alias_to_from)
         join = make_joins(join, child, alias_to_from)
     end
     if alias.parent === nothing && on isa Vector{PGColumn}
-        args = SQLValue[]
+        args = SQLExpr[]
         for (k, col) in enumerate(on)
-            push!(args, Op(:(=), pick(from, Symbol(col.name)), Op(:placeholder, Const(k))))
+            push!(args, Op(:(=), pick(from, Symbol(col.name)), Placeholder(k)))
         end
         pred = Op(:(&&), args...)
         join = Where(join, pred)
@@ -779,7 +779,7 @@ function make_sql(bundle)
     columns = make_columns(bundle)
     alias_to_from = Dict{SQLAlias,SQLClause}()
     j = make_joins(nothing, bundle.root, alias_to_from)
-    list = Pair{Symbol,SQLValue}[]
+    list = Pair{Symbol,SQLExpr}[]
     for (alias, col) in columns
         push!(list, Symbol(col.name) => pick(alias_to_from[alias], Symbol(col.name)))
     end
