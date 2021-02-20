@@ -45,10 +45,10 @@ SQLQueryClosure(core::SQLQueryCore, arg::SQLQuery) =
     SQLQuery(c.core, [q, c.args...])
 
 Base.length(q::SQLQuery) =
-    length(getfield(q, :args))
+    length(q.args)
 
 Base.iterate(q::SQLQuery, state=1) =
-    iterate(getfield(q, :args), state)
+    iterate(q.args, state)
 
 # Expressions
 
@@ -221,12 +221,6 @@ Base.getindex(q::SQLQuery, attr::Symbol) =
 Base.getindex(q::SQLQuery, attr::String) =
     pick(q, Symbol(attr))
 
-Base.getproperty(q::SQLQuery, attr::Symbol) =
-    pick(q, attr)
-
-Base.getproperty(q::SQLQuery, attr::String) =
-    pick(q, Symbol(attr))
-
 operation_name(core::OpCore{S}) where {S} =
     S
 
@@ -297,8 +291,7 @@ function pick(q::SQLQuery, s::Symbol)
 end
 
 function pick(q::SQLQuery, s::Symbol, default)
-    core = getfield(q, :core)
-    pick(core, q, s, default)
+    pick(q.core, q, s, default)
 end
 
 pick(core::SQLQueryCore, q, s, default) =
@@ -340,7 +333,7 @@ function pick(core::GroupCore, q, s, default)
 end
 
 default_list(q::SQLQuery) =
-    default_list(getfield(q, :core), q)
+    default_list(q.core, q)
 
 default_list(::SQLQueryCore, q) =
     SQLExpr[]
@@ -410,7 +403,7 @@ function normalize(q::SQLQuery)
 end
 
 normalize(q::SQLQuery, refs) =
-    normalize(getfield(q, :core), q, refs)
+    normalize(q.core, q, refs)
 
 function normalize(core::SelectCore, q, refs)
     base, = q
@@ -421,7 +414,7 @@ function normalize(core::SelectCore, q, refs)
     repl = Dict{SQLExpr,SQLExpr}()
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && getfield(ref_core.over, :core) === core
+        if ref_core isa PickCore && ref_core.over.core === core
             repl[ref] = Pick(c′, ref_core.field)
         end
     end
@@ -484,7 +477,7 @@ function normalize(core::FromCore, q, refs)
     repl = Dict{SQLExpr,SQLExpr}()
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && getfield(ref_core.over, :core) === core
+        if ref_core isa PickCore && ref_core.over.core === core
             field = ref_core.field
             repl[ref] = Pick(s, field)
             push!(list, field => Const(field))
@@ -498,7 +491,7 @@ function normalize(core::GroupCore, q, refs)
     base_refs = collect_refs(core.list)
     for ref in refs
         ref_core = ref.core
-        if ref_core isa AggregateCore && getfield(ref_core.over, :core) === core
+        if ref_core isa AggregateCore && ref_core.over.core === core
             collect_refs!(ref.args, base_refs)
         end
     end
@@ -510,10 +503,10 @@ function normalize(core::GroupCore, q, refs)
     pos = 0
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && getfield(ref_core.over, :core) === core
+        if ref_core isa PickCore && ref_core.over.core === core
             pos += 1
             repl[ref] = Pick(s, ref_core.field)
-        elseif ref_core isa AggregateCore && getfield(ref_core.over, :core) === core
+        elseif ref_core isa AggregateCore && ref_core.over.core === core
             pos += 1
             field = Symbol("_", pos)
             repl[ref] = Pick(s, field)
@@ -525,7 +518,7 @@ function normalize(core::GroupCore, q, refs)
 end
 
 to_sql!(ctx, q::SQLQuery) =
-    to_sql!(ctx, getfield(q, :core), q)
+    to_sql!(ctx, q.core, q)
 
 to_sql!(ctx, ex::SQLExpr) =
     to_sql!(ctx, ex.core, ex)
@@ -632,7 +625,7 @@ function to_sql!(ctx, core::SelectCore, q)
         print(ctx, " AS ")
         to_sql!(ctx, alias)
     end
-    if getfield(base, :core) isa SelectCore
+    if base.core isa SelectCore
         print(ctx, " FROM (")
         to_sql!(ctx, base)
         print(ctx, ") AS ")
@@ -668,11 +661,11 @@ function populate_aliases!(ctx, qs::Vector{SQLQuery})
 end
 
 function populate_aliases!(ctx, q::SQLQuery)
-    base_core = getfield(q, :core)
+    base_core = q.core
     if base_core isa SelectCore
         ctx.aliases[q] = gensym()
     end
-    populate_aliases!(ctx, getfield(q, :args))
+    populate_aliases!(ctx, q.args)
 end
 
 mutable struct ToSQLContext <: IO
