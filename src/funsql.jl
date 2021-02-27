@@ -2,7 +2,9 @@
 # DSL for assembling SQL queries.
 #
 
-# SQL Catalog
+#
+# SQL Objects.
+#
 
 mutable struct SQLTable
     scm::Symbol
@@ -13,587 +15,716 @@ end
 SQLTable(tbl::PGTable) =
     SQLTable(Symbol(tbl.schema.name), Symbol(tbl.name), Symbol[Symbol(col.name) for col in tbl])
 
-# Queries
+#
+# SQL Nodes.
+#
 
-abstract type SQLQueryCore end
+abstract type SQLCore end
 
-mutable struct SQLQuery
-    core::SQLQueryCore
-    args::Vector{SQLQuery}
+mutable struct SQLNode
+    core::SQLCore
+    args::Vector{SQLNode}
 end
 
-const EMPTY_SQLQUERY_VECTOR = SQLQuery[]
+const EMPTY_SQLNODE_VECTOR = SQLNode[]
 
-SQLQuery(core::SQLQueryCore) =
-    SQLQuery(core, EMPTY_SQLQUERY_VECTOR)
+SQLNode(core::SQLCore) =
+    SQLNode(core, EMPTY_SQLNODE_VECTOR)
 
-SQLQuery(core::SQLQueryCore, arg::SQLQuery) =
-    SQLQuery(core, [arg])
+SQLNode(core::SQLCore, arg::SQLNode) =
+    SQLNode(core, [arg])
 
-struct SQLQueryClosure
-    core::SQLQueryCore
-    args::Vector{SQLQuery}
+#
+# Closure for incremental construction.
+#
+
+struct SQLNodeClosure
+    core::SQLCore
+    args::Vector{SQLNode}
 end
 
-SQLQueryClosure(core::SQLQueryCore) =
-    SQLQueryClosure(core, EMPTY_SQLQUERY_VECTOR)
+SQLNodeClosure(core::SQLCore) =
+    SQLNodeClosure(core, [])
 
-SQLQueryClosure(core::SQLQueryCore, arg::SQLQuery) =
-    SQLQueryClosure(core, [arg])
+(c::SQLNodeClosure)(n::SQLNode) =
+    SQLNode(c.core, [n, c.args...])
 
-(c::SQLQueryClosure)(q::SQLQuery) =
-    SQLQuery(c.core, [q, c.args...])
+(c::SQLNodeClosure)(n) =
+    c(convert(SQLNode, n))
 
-Base.length(q::SQLQuery) =
-    length(q.args)
+#
+# Node cores.
+#
 
-Base.iterate(q::SQLQuery, state=1) =
-    iterate(q.args, state)
+@inline SQLCore(T::Type{<:SQLCore}, args...) =
+    T(SQLCore, args...)
 
-# Expressions
-
-abstract type SQLExprCore end
-
-struct SQLExpr
-    core::SQLExprCore
-    args::Vector{SQLExpr}
+struct Unit <: SQLCore
+    Unit(::Type{SQLCore}) =
+        new()
 end
 
-const EMPTY_SQLEXPR_VECTOR = SQLExpr[]
+struct From <: SQLCore
+    tbl::SQLTable
 
-SQLExpr(core) =
-    SQLExpr(core, EMPTY_SQLEXPR_VECTOR)
-
-Base.length(q::SQLExpr) =
-    length(q.args)
-
-Base.iterate(q::SQLExpr, state=1) =
-    iterate(q.args, state)
-
-# Query cores
-
-# Unit
-
-struct UnitCore <: SQLQueryCore
+    From(::Type{SQLCore}, tbl::SQLTable) =
+        new(tbl)
 end
 
-Unit() = SQLQuery(UnitCore())
+struct Select <: SQLCore
+    Select(::Type{SQLCore}) =
+        new()
+end
+
+struct Where <: SQLCore
+    Where(::Type{SQLCore}) =
+        new()
+end
+
+struct Join <: SQLCore
+    is_left::Bool
+    is_right::Bool
+    is_lateral::Bool
+
+    Join(::Type{SQLCore}, is_left::Bool, is_right::Bool, is_lateral::Bool) =
+        new(is_left,is_right, is_lateral)
+end
+
+struct Group <: SQLCore
+    Group(::Type{SQLCore}) =
+        new()
+end
+
+struct As <: SQLCore
+    name::Symbol
+
+    As(::Type{SQLCore}, name::Symbol) =
+        new(name)
+end
+
+struct Literal{T} <: SQLCore
+    val::T
+
+    Literal{T}(::Type{SQLCore}, val::T) where {T} =
+        new{T}(val)
+end
+
+struct ColLookup <: SQLCore
+    name::Symbol
+
+    ColLookup(::Type{SQLCore}, name::Symbol) =
+        new(name)
+end
+
+struct NavLookup <: SQLCore
+    name::Symbol
+
+    NavLookup(::Type{SQLCore}, name::Symbol) =
+        new(name)
+end
+
+struct FunCall{S} <: SQLCore
+    FunCall{S}(::Type{SQLCore}) where {S} =
+        new{S}()
+end
+
+struct AggCall{S} <: SQLCore
+    AggCall{S}(::Type{SQLCore}) where {S} =
+        new{S}()
+end
+
+struct Placeholder <: SQLCore
+    pos::Int
+
+    Placeholder(::Type{SQLCore}, pos::Int) =
+        new(pos)
+end
+
+#
+# Constructors.
+#
 
 # From
 
-struct FromCore <: SQLQueryCore
-    tbl::SQLTable
-end
+From(::Nothing) =
+    SQLNode(SQLCore(Unit))
 
 From(tbl::SQLTable) =
-    SQLQuery(FromCore(tbl))
+    SQLNode(SQLCore(From, tbl))
+
+const FromNothing = From(nothing)
+
+Base.convert(::Type{SQLNode}, tbl::SQLTable) =
+    From(tbl)
 
 # Select
 
-struct SelectCore <: SQLQueryCore
-    list::Vector{Pair{Symbol,SQLExpr}}
-end
+Select(list::Vector{SQLNode}) =
+    SQLNodeClosure(SQLCore(Select), list)
 
-Select(q::SQLQuery, list::Vector{Pair{Symbol,SQLExpr}}) =
-    SQLQuery(SelectCore(list), q)
-
-Select(list::Vector{Pair{Symbol,SQLExpr}}) =
-    SQLQueryClosure(SelectCore(list))
-
-Select(q::SQLQuery, list...) =
-    Select(q, default_alias(list))
+Select(list::AbstractVector) =
+    SQLNodeClosure(SQLCore(Select), SQLNode[list...])
 
 Select(list...) =
-    Select(default_alias(list))
+    SQLNodeClosure(SQLCore(Select), SQLNode[list...])
 
 # Where
 
-struct WhereCore <: SQLQueryCore
-    pred::SQLExpr
-end
-
-Where(q::SQLQuery, pred::SQLExpr) =
-    SQLQuery(WhereCore(pred), q)
-
-Where(pred::SQLExpr) =
-    SQLQueryClosure(WhereCore(pred))
+Where(pred) =
+    SQLNodeClosure(SQLCore(Where), SQLNode[pred])
 
 # Join
 
-struct JoinCore <: SQLQueryCore
-    left_name::Union{Symbol,Nothing}
-    right_name::Union{Symbol,Nothing}
-    on::SQLExpr
-end
-
-function Join(left::Union{Pair{Symbol,SQLQuery},SQLQuery},
-              right::Union{Pair{Symbol,SQLQuery},SQLQuery},
-              on::SQLExpr)
-    if left isa SQLQuery
-        left_name = nothing
-    else
-        left_name = first(left)
-        left = last(left)
-    end
-    if right isa SQLQuery
-        right_name = nothing
-    else
-        right_name = first(right)
-        right = last(right)
-    end
-    SQLQuery(JoinCore(left_name, right_name, on), [left, right])
-end
-
-function Join(right::Union{Pair{Symbol,SQLQuery},SQLQuery},
-              on::SQLExpr)
-    if right isa SQLQuery
-        right_name = nothing
-    else
-        right_name = first(right)
-        right = last(right)
-    end
-    SQLQueryClosure(JoinCore(nothing, right_name, on), [right])
-end
+Join(right, on; is_left::Bool=false, is_right::Bool=false, is_lateral::Bool=false) =
+    SQLNodeClosure(SQLCore(Join, is_left, is_right, is_lateral), SQLNode[right, on])
 
 # Group
 
-struct GroupCore <: SQLQueryCore
-    list::Vector{Pair{Symbol,SQLExpr}}
-end
+Group(list::Vector{SQLNode}) =
+    SQLNodeClosure(SQLCore(Group), list)
 
-Group(q::SQLQuery, list::Vector{Pair{Symbol,SQLExpr}}) =
-    SQLQuery(GroupCore(list), q)
-
-Group(list::Vector{Pair{Symbol,SQLExpr}}) =
-    SQLQueryClosure(GroupCore(list))
-
-Group(q::SQLQuery, list...) =
-    Group(q, default_alias(list))
+Group(list::AbstractVector) =
+    SQLNodeClosure(SQLCore(Group), SQLNode[list...])
 
 Group(list...) =
-    Group(default_alias(list))
+    SQLNodeClosure(SQLCore(Group), SQLNode[list...])
 
-# Expressions
+# Aliases
 
-struct ConstCore{T} <: SQLExprCore
-    val::T
+As(name::Symbol) =
+    SQLNodeClosure(SQLCore(As, name))
+
+As(name::AbstractString) =
+    SQLNodeClosure(SQLCore(As, Symbol(name)))
+
+Base.convert(::Type{SQLNode}, p::Pair{Symbol}) =
+    convert(SQLNode, last(p)) |> As(first(p))
+
+Base.convert(::Type{SQLNode}, p::Pair{<:AbstractString}) =
+    convert(SQLNode, Symbol(first(p)) => last(p))
+
+# Constants
+
+Literal(val::T) where {T} =
+    SQLNode(SQLCore(Literal{T}, val))
+
+Base.convert(::Type{SQLNode}, val::Union{Bool,Number,AbstractString}) =
+    Literal(val)
+
+# Bound columns
+
+ColLookup(name::Symbol) =
+    SQLNodeClosure(SQLCore(ColLookup, name))
+
+# Lookup
+
+struct NavNamespace
 end
 
-struct PickCore <: SQLExprCore
-    field::Symbol
-    over::SQLQuery
+struct NavClosure
+    base::SQLNode
 end
 
-struct OpCore{S} <: SQLExprCore
+const Nav = NavNamespace()
+
+(nav::NavNamespace)(name::Symbol) =
+    NavClosure(SQLNode(SQLCore(NavLookup, name)))
+
+function (nav::NavClosure)(name::Symbol)
+    base = getfield(nav, :base)
+    NavClosure(SQLNode(SQLCore(NavLookup, name), base))
 end
 
-struct AggregateCore{S} <: SQLExprCore
-    over::SQLQuery
+(nav::Union{NavNamespace,NavClosure})(name::AbstractString) =
+    nav(Symbol(name))
+
+(nav::Union{NavNamespace,NavClosure})(name::Union{Symbol,AbstractString}, more::Union{Symbol,AbstractString}...) =
+    nav(name)(more...)
+
+Base.getproperty(nav::Union{NavNamespace,NavClosure}, name::Symbol) =
+    nav(name)
+
+Base.getproperty(nav::Union{NavNamespace,NavClosure}, name::AbstractString) =
+    nav(name)
+
+Base.convert(::Type{SQLNode}, nav::NavClosure) =
+    getfield(nav, :base)
+
+# Operations
+
+struct FunNamespace
 end
 
-struct PlaceholderCore <: SQLExprCore
-    pos::Int
+struct FunClosure
+    name::Symbol
 end
 
+const Fun = FunNamespace()
 
-#=
-struct OpLookup
+(fun::FunNamespace)(name::Symbol, args...) =
+    SQLNode(SQLCore(FunCall{name}), SQLNode[args...])
+
+(fun::FunNamespace)(name::AbstractString, args...) =
+    SQLNode(SQLCore(FunCall{Symbol(name)}), SQLNode[args...])
+
+Base.getproperty(fun::FunNamespace, name::Symbol) =
+    FunClosure(name)
+
+Base.getproperty(fun::FunNamespace, name::AbstractString) =
+    FunClosure(Symbol(name))
+
+(fun::FunClosure)(args...) =
+    SQLNode(SQLCore(FunCall{fun.name}), SQLNode[args...])
+
+# Aggregate operations
+
+struct AggNamespace
 end
 
-Base.getproperty(::OpLookup, S::Symbol) =
-    (args...) -> SQLExpr(OpCore(S){}, SQLExpr[args...])
+struct AggClosure
+    name::Symbol
+end
 
-const Op = OpLookup()
+const Agg = AggNamespace()
 
-Op.CONCAT("Now is ", Op.NOW())
+(agg::AggNamespace)(name::Symbol, args...; over::SQLNode=FromNothing) =
+    SQLNode(SQLCore(AggCall{name}), SQLNode[over, args...])
 
-Agg.COUNT()
+(agg::AggNamespace)(name::AbstractString, args...; over::SQLNode=FromNothing) =
+    SQLNode(SQLCore(AggCall{Symbol(name)}), SQLNode[over, args...])
 
-Agg.MAX()
+Base.getproperty(agg::AggNamespace, name::Symbol) =
+    AggClosure(name)
 
-to_sql(ctx, ::PostresDialect, ::OpCore{:CONCAT}, args) =
-    print(ctx, "args[1] || args[2]")
-=#
+Base.getproperty(agg::AggNamespace, name::AbstractString) =
+    AggClosure(Symbol(name))
 
-Base.getindex(q::SQLQuery, attr::Symbol) =
-    pick(q, attr)
+(agg::AggClosure)(args...; over::SQLNode=FromNothing) =
+    SQLNode(SQLCore(AggCall{agg.name}), SQLNode[over, args...])
 
-Base.getindex(q::SQLQuery, attr::String) =
-    pick(q, Symbol(attr))
+const Count = Agg.COUNT
 
-operation_name(core::OpCore{S}) where {S} =
-    S
+const Max = Agg.MAX
 
-operation_name(core::AggregateCore{S}) where {S} =
-    S
-
-Const(val::T) where {T} =
-    SQLExpr(ConstCore{T}(val))
-
-Pick(over::SQLQuery, field) =
-    SQLExpr(PickCore(field, over))
-
-Op(op, args...) =
-    SQLExpr(OpCore{op}(), SQLExpr[args...])
-
-Count(; over::SQLQuery) =
-    SQLExpr(AggregateCore{:COUNT}(over))
-
-Max(val; over::SQLQuery) =
-    SQLExpr(AggregateCore{:MAX}(over), SQLExpr[val])
+# Placeholder
 
 Placeholder(pos) =
-    SQLExpr(PlaceholderCore(pos))
+    SQLNode(SQLCore(Placeholder, pos))
 
-function collect_refs(ex)
-    refs = Set{SQLExpr}()
-    collect_refs!(ex, refs)
+# Aliases
+
+alias(n::SQLNode) =
+    alias(n.core, n)::Union{Symbol,Nothing}
+
+alias(core::SQLCore, n) =
+    nothing
+
+alias(core::As, n) =
+    core.name
+
+alias(core::Literal{T}, n) where {T} =
+    nameof(T)
+
+alias(core::ColLookup, n) =
+    core.name
+
+alias(core::NavLookup, n) =
+    core.name
+
+alias(core::FunCall{name}, n) where {name} =
+    name
+
+alias(core::AggCall{name}, n) where {name} =
+    name
+
+# Lookup
+
+Base.getindex(n::SQLNode, name::Symbol) =
+    lookup(n, name)
+
+Base.getindex(n::SQLNode, name::AbstractString) =
+    lookup(n, Symbol(name))
+
+function lookup(n::SQLNode, name::Symbol)
+    l = lookup(n, name, nothing)
+    l !== nothing || error("cannot find $name")
+    l
+end
+
+lookup(n::SQLNode, name::Symbol, default::T) where {T} =
+    lookup(n.core, n, name, default)::Union{SQLNode,T}
+
+lookup(::SQLCore, n, name, default) =
+    default
+
+lookup(::As, n, name, default) =
+    lookup(n.args[1], name, default)
+
+lookup(core::From, n, name, default) =
+    name in core.tbl.cols ? n |> ColLookup(name) : default
+
+function lookup(::Select, n, name, default)
+    list = @view n.args[2:end]
+    for arg in list
+        if alias(arg) === name
+            return n |> ColLookup(name)
+        end
+    end
+    default
+end
+
+function lookup(::Where, n, name, default)
+    base = n.args[1]
+    base_alias = alias(base)
+    base_alias === nothing ?
+        lookup(base, name, default) :
+    base_alias === name ?
+        base :
+        default
+end
+
+function lookup(::Join, n, name, default)
+    left = n.args[1]
+    right = n.args[2]
+    left_alias = alias(left)
+    right_alias = alias(right)
+    if name === left_alias
+        return left
+    end
+    if name === right_alias
+        return right
+    end
+    if left_alias === nothing
+        l = lookup(left, name, nothing)
+        if l !== nothing
+            return l
+        end
+    end
+    if right_alias === nothing
+        l = lookup(right, name, nothing)
+        if l !== nothing
+            return l
+        end
+    end
+    default
+end
+
+function lookup(::Group, n, name, default)
+    base = n.args[1]
+    base_alias = alias(base)
+    if name === base_alias
+        return base
+    end
+    list = @view n.args[2:end]
+    for arg in list
+        if alias(arg) === name
+            return n |> ColLookup(name)
+        end
+    end
+    if base_alias === nothing
+        return lookup(base, name, default)
+    end
+    default
+end
+
+operation_name(core::FunCall{S}) where {S} =
+    S
+
+operation_name(core::AggCall{S}) where {S} =
+    S
+
+function collect_refs(n)
+    refs = Set{SQLNode}()
+    collect_refs!(n, refs)
     refs
 end
 
-function collect_refs!(ex::SQLExpr, refs)
-    if ex.core isa PickCore || ex.core isa AggregateCore
-        push!(refs, ex)
+function collect_refs!(n::SQLNode, refs)
+    if n.core isa ColLookup || n.core isa AggCall
+        push!(refs, n)
     end
-    collect_refs!(ex.args, refs)
+    collect_refs!(n.args, refs)
 end
 
-function collect_refs!(exs::Vector{SQLExpr}, refs)
-    for ex in exs
-        collect_refs!(ex, refs)
-    end
-end
-
-function collect_refs!(list::Vector{Pair{Symbol,SQLExpr}}, refs)
-    for (alias, ex) in list
-        collect_refs!(ex, refs)
+function collect_refs!(ns::AbstractVector{SQLNode}, refs)
+    for n in ns
+        collect_refs!(n, refs)
     end
 end
 
-replace_refs(list::Vector{Pair{Symbol,SQLExpr}}, repl) =
-    Pair{Symbol,SQLExpr}[alias => replace_refs(ex, repl) for (alias, ex) in list]
-
-function replace_refs(ex::SQLExpr, repl)
-    if ex.core isa PickCore || ex.core isa AggregateCore
-        return get(repl, ex, ex)
+function replace_refs(n::SQLNode, repl)
+    if n.core isa ColLookup || n.core isa AggCall
+        return get(repl, n, n)
     end
-    args′ = replace_refs(ex.args, repl)
-    SQLExpr(ex.core, args′)
+    args′ = replace_refs(n.args, repl)
+    SQLNode(n.core, args′)
 end
 
-replace_refs(exs::Vector{SQLExpr}, repl) =
-    SQLExpr[replace_refs(ex, repl) for ex in exs]
+replace_refs(ns::AbstractVector{SQLNode}, repl) =
+    SQLNode[replace_refs(n, repl) for n in ns]
 
-function pick(q::SQLQuery, s::Symbol)
-    val = pick(q, s, nothing)
-    val !== nothing || error("cannot found $s")
-    val
-end
+default_list(n::SQLNode) =
+    default_list(n.core, n)::Vector{SQLNode}
 
-function pick(q::SQLQuery, s::Symbol, default)
-    pick(q.core, q, s, default)
-end
+default_list(@nospecialize(::SQLCore), n) =
+    SQLNode[]
 
-pick(core::SQLQueryCore, q, s, default) =
-    default
+default_list(core::From, n) =
+    SQLNode[n |> ColLookup(name) for name in core.tbl.cols]
 
-function pick(core::FromCore, q, s, default)
-    s in core.tbl.cols ? Pick(q, s) : default
-end
+default_list(::Select, n) =
+    SQLNode[n |> ColLookup(alias(l)) for l in @view n.args[2:end]]
 
-function pick(core::SelectCore, q, s, default)
-    findfirst(p -> first(p) === s, core.list) !== nothing ? Pick(q, s) : default
-end
-
-function pick(core::WhereCore, q, s, default)
-    base, = q
-    pick(base, s, default)
-end
-
-function pick(core::JoinCore, q, s, default)
-    left, right = q
-    if s === core.left_name
-        return left
-    elseif s === core.right_name
-        return right
-    end
-    val = nothing
-    if core.left_name === nothing
-        val = pick(left, s, nothing)
-    end
-    if val === nothing && core.right_name === nothing
-        val = pick(right, s, nothing)
-    end
-    val !== nothing ? val : default
-end
-
-function pick(core::GroupCore, q, s, default)
-    base, = q
-    findfirst(p -> first(p) === s, core.list) !== nothing ? Pick(q, s) : pick(base, s, default)
-end
-
-default_list(q::SQLQuery) =
-    default_list(q.core, q)
-
-default_list(::SQLQueryCore, q) =
-    SQLExpr[]
-
-default_list(core::FromCore, q) =
-    SQLExpr[Pick(q, col) for col in core.tbl.cols]
-
-default_list(core::SelectCore, q) =
-    SQLExpr[Pick(q, alias) for (alias, v) in core.list]
-
-function default_list(core::WhereCore, q)
-    base, = q
+function default_list(::Where, n)
+    base, = n
     default_list(base)
 end
 
-function default_list(core::JoinCore, q)
+function default_list(::Join, n)
     #=
-    left, right = q
-    SQLExpr[default_list(left)..., default_list(right)...]
+    left, right = n.args
+    SQLNode[default_list(left)..., default_list(right)...]
     =#
-    left, right = q
-    list = SQLExpr[]
-    if core.left_name === nothing
+    left, right = n.args
+    left_name = alias(left)
+    right_name = alias(right)
+    list = SQLNode[]
+    if left_name === nothing
         append!(list, default_list(left))
     end
-    if core.right_name === nothing
+    if right_name === nothing
         append!(list, default_list(right))
     end
     list
 end
 
-default_list(core::GroupCore, q) =
-    SQLExpr[Pick(q, alias) for (alias, v) in core.list]
+default_list(::Group, n) =
+    SQLNode[n |> ColLookup(alias(l)) for l in @view n.args[2:end]]
 
-function default_alias(@nospecialize list)
-    list′ = Pair{Symbol,SQLExpr}[]
-    seen = Set{Symbol}()
-    for p in list
-        p′= default_alias(p)
-        !(first(p′) in seen) || error("duplicate alias $(first(p′))")
-        push!(list′, p′)
-        push!(seen, first(p′))
-    end
-    list′
+
+function normalize(n::SQLNode)
+    n′, repl = normalize(n, default_list(n))
+    n′
 end
 
-default_alias(p::Pair) = p
+normalize(n::SQLNode, refs) =
+    normalize(n.core, n, refs)
 
-default_alias(ex::SQLExpr) =
-    default_alias(ex.core) => ex
+normalize(::As, n, refs) =
+    normalize(n.args[1], refs)
 
-default_alias(core::PickCore) =
-    core.field
-
-default_alias(core::ConstCore) =
-    Symbol(core.val)
-
-default_alias(core::OpCore{S}) where {S} =
-    S
-
-default_alias(core::AggregateCore{S}) where {S} =
-    S
-
-function normalize(q::SQLQuery)
-    q′, repl = normalize(q, default_list(q))
-    q′
-end
-
-normalize(q::SQLQuery, refs) =
-    normalize(q.core, q, refs)
-
-function normalize(core::SelectCore, q, refs)
-    base, = q
-    base_refs = collect_refs(core.list)
+function normalize(core::Select, n, refs)
+    base = n.args[1]
+    list = @view n.args[2:end]
+    base_refs = collect_refs(list)
     base′, base_repl = normalize(base, base_refs)
-    list′ = replace_refs(core.list, base_repl)
-    c′ = Select(base′, list′)
-    repl = Dict{SQLExpr,SQLExpr}()
+    list′ = replace_refs(list, base_repl)
+    n′ = base′ |> Select(list′)
+    repl = Dict{SQLNode,SQLNode}()
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && ref_core.over.core === core
-            repl[ref] = Pick(c′, ref_core.field)
+        if ref_core isa ColLookup && ref.args[1].core === core
+            repl[ref] = n′ |> ColLookup(ref_core.name)
         end
     end
-    c′, repl
+    n′, repl
 end
 
-function normalize(core::WhereCore, q, refs)
-    base, = q
-    base_refs = collect_refs(core.pred)
+function normalize(::Where, n, refs)
+    base, pred = n.args
+    base_refs = collect_refs(pred)
     for ref in refs
         push!(base_refs, ref)
     end
     base′, base_repl = normalize(base, base_refs)
-    pred′ = replace_refs(core.pred, base_repl)
-    c′ = Where(base′, pred′)
-    list = Pair{Symbol,SQLExpr}[]
-    s = Select(c′, list)
-    repl = Dict{SQLExpr,SQLExpr}()
+    pred′ = replace_refs(pred, base_repl)
+    n′ = base′ |> Where(pred′)
+    s = n′ |> Select()
+    repl = Dict{SQLNode,SQLNode}()
     pos = 0
     for ref in refs
         if ref in keys(base_repl)
             pos += 1
-            field = Symbol("_", pos)
-            repl[ref] = Pick(s, field)
-            push!(list, field => base_repl[ref])
+            name = Symbol("_", pos)
+            repl[ref] = s |> ColLookup(name)
+            push!(s.args, base_repl[ref] |> As(name))
         end
     end
     s, repl
 end
 
-function normalize(core::JoinCore, q, refs)
-    left, right = q
-    all_refs = collect_refs(core.on)
+function normalize(::Join, n, refs)
+    left, right, on = n.args
+    all_refs = collect_refs(on)
     for ref in refs
         push!(all_refs, ref)
     end
     left′, left_repl = normalize(left, all_refs)
     right′, right_repl = normalize(right, all_refs)
     all_repl = merge(left_repl, right_repl)
-    on′ = replace_refs(core.on, all_repl)
-    c′ = Join(left′, right′, on′)
-    list = Pair{Symbol,SQLExpr}[]
-    s = Select(c′, list)
-    repl = Dict{SQLExpr,SQLExpr}()
+    on′ = replace_refs(on, all_repl)
+    n′ = left′ |> Join(right′, on′)
+    s = n′ |> Select()
+    repl = Dict{SQLNode,SQLNode}()
     pos = 0
     for ref in refs
         if ref in keys(all_repl)
             pos += 1
-            field = Symbol("_", pos)
-            repl[ref] = Pick(s, field)
-            push!(list, field => all_repl[ref])
+            name = Symbol("_", pos)
+            repl[ref] = s |> ColLookup(name)
+            push!(s.args, all_repl[ref] |> As(name))
         end
     end
     s, repl
 end
 
-function normalize(core::FromCore, q, refs)
-    list = Pair{Symbol,SQLExpr}[]
-    s = Select(q, list)
-    repl = Dict{SQLExpr,SQLExpr}()
+function normalize(core::From, n, refs)
+    s = n |> Select()
+    repl = Dict{SQLNode,SQLNode}()
+    seen = Set{Symbol}()
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && ref_core.over.core === core
-            field = ref_core.field
-            repl[ref] = Pick(s, field)
-            push!(list, field => Const(field))
+        if ref_core isa ColLookup && ref.args[1].core === core
+            name = ref_core.name
+            repl[ref] = s |> ColLookup(name)
+            if !(name in seen)
+                push!(s.args, Literal(name))
+                push!(seen, name)
+            end
         end
     end
     s, repl
 end
 
-function normalize(core::GroupCore, q, refs)
-    base, = q
-    base_refs = collect_refs(core.list)
+function normalize(core::Group, n, refs)
+    base = n.args[1]
+    list = @view n.args[2:end]
+    base_refs = collect_refs(list)
     for ref in refs
         ref_core = ref.core
-        if ref_core isa AggregateCore && ref_core.over.core === core
+        if ref_core isa AggCall && (ref.args[1].core === core || ref.args[1].core === FromNothing.core)
             collect_refs!(ref.args, base_refs)
         end
     end
     base′, base_repl = normalize(base, base_refs)
-    list′ = replace_refs(core.list, base_repl)
-    c′ = Group(base′, Pair{Symbol,SQLExpr}[Symbol("_", k) => Const(k) for k = 1:length(core.list)])
-    s = Select(c′, list′)
-    repl = Dict{SQLExpr,SQLExpr}()
+    list′ = replace_refs(list, base_repl)
+    c′ = base′ |> Group(SQLNode[Literal(k) for k = 1:length(list)])
+    s = c′ |> Select(list′)
+    repl = Dict{SQLNode,SQLNode}()
     pos = 0
     for ref in refs
         ref_core = ref.core
-        if ref_core isa PickCore && ref_core.over.core === core
+        if ref_core isa ColLookup && ref.args[1].core === core
             pos += 1
-            repl[ref] = Pick(s, ref_core.field)
-        elseif ref_core isa AggregateCore && ref_core.over.core === core
+            repl[ref] = s |> ColLookup(ref_core.name)
+        elseif ref_core isa AggCall && (ref.args[1].core === core || ref.args[1].core === FromNothing.core)
             pos += 1
-            field = Symbol("_", pos)
-            repl[ref] = Pick(s, field)
-            core′ = AggregateCore{operation_name(ref_core)}(c′)
-            push!(list′, field => SQLExpr(core′, replace_refs(ref.args, base_repl)))
+            name = Symbol("_", pos)
+            repl[ref] = s |> ColLookup(name)
+            push!(s.args, SQLNode(ref_core, SQLNode[c′, replace_refs(ref.args, @view base_repl[2:end])]))
         end
     end
     s, repl
 end
 
-to_sql!(ctx, q::SQLQuery) =
-    to_sql!(ctx, q.core, q)
+Base.@kwdef mutable struct ToSQLContext <: IO
+    io::IOBuffer = IOBuffer()
+    aliases::Dict{Any,Symbol} = Dict{Any,Symbol}()  # Dict{Select,Symbol}
+end
 
-to_sql!(ctx, ex::SQLExpr) =
-    to_sql!(ctx, ex.core, ex)
+Base.write(ctx::ToSQLContext, octet::UInt8) =
+    write(ctx.io, octet)
 
-function to_sql!(ctx, exs::Vector{SQLExpr}, sep=", ", left="(", right=")")
+Base.unsafe_write(ctx::ToSQLContext, input::Ptr{UInt8}, nbytes::UInt) =
+    unsafe_write(ctx.io, input, nbytes)
+
+function to_sql(n::SQLNode)
+    ctx = ToSQLContext()
+    to_sql!(ctx, n)
+    String(take!(ctx.io))
+end
+
+to_sql!(ctx, n::SQLNode) =
+    to_sql!(ctx, n.core, n)
+
+function to_sql!(ctx, ns::AbstractVector{SQLNode}, sep=", ", left="(", right=")")
     print(ctx, left)
     first = true
-    for ex in exs
+    for n in ns
         if !first
             print(ctx, sep)
         else
             first = false
         end
-        to_sql!(ctx, ex)
+        to_sql!(ctx, n)
     end
     print(ctx, right)
 end
 
-to_sql!(ctx, core::ConstCore, ex) =
+to_sql!(ctx, core::Literal, n) =
     to_sql!(ctx, core.val)
 
-to_sql!(ctx, core::PickCore, ex) =
-    to_sql!(ctx, (ctx.aliases[core.over], core.field))
+to_sql!(ctx, core::ColLookup, n) =
+    to_sql!(ctx, (ctx.aliases[n.args[1]], core.name))
 
-function to_sql!(ctx, @nospecialize(core::AggregateCore{S}), ex) where {S}
+function to_sql!(ctx, @nospecialize(core::AggCall{S}), n) where {S}
     print(ctx, S)
-    to_sql!(ctx, ex.args)
+    to_sql!(ctx, n.args)
 end
 
-to_sql!(ctx, core::AggregateCore{:COUNT}, ex) =
+to_sql!(ctx, core::AggCall{:COUNT}, n) =
     print(ctx, "COUNT(TRUE)")
 
-function to_sql!(ctx, @nospecialize(core::OpCore{S}), ex) where {S}
+function to_sql!(ctx, @nospecialize(core::FunCall{S}), n) where {S}
     print(ctx, S)
-    to_sql!(ctx, ex.args)
+    to_sql!(ctx, n.args)
 end
 
-function to_sql!(ctx, core::OpCore{:(=)}, ex)
-    to_sql!(ctx, ex.args, " = ")
+function to_sql!(ctx, core::FunCall{:(=)}, n)
+    to_sql!(ctx, n.args, " = ")
 end
 
-function to_sql!(ctx, core::OpCore{:(&&)}, ex)
-    if isempty(ex.args)
+function to_sql!(ctx, core::FunCall{:(&&)}, n)
+    if isempty(n.args)
         print(ctx, "TRUE")
     else
-        to_sql!(ctx, ex.args, " AND ")
+        to_sql!(ctx, n.args, " AND ")
     end
 end
 
-function to_sql!(ctx, core::PlaceholderCore, ex)
+function to_sql!(ctx, core::Placeholder, n)
     print(ctx, '$')
     to_sql!(ctx, core.pos)
 end
 
-function to_sql!(ctx, core::FromCore, q)
+function to_sql!(ctx, core::As, n)
+    arg, = n.args
+    to_sql!(ctx, arg)
+    print(ctx, " AS ")
+    to_sql!(ctx, core.name)
+end
+
+function to_sql!(ctx, core::From, n)
     tbl = core.tbl
     print(ctx, " FROM ")
     to_sql!(ctx, (tbl.scm, tbl.name))
 end
 
-function to_sql!(ctx, ::UnitCore, q)
+function to_sql!(ctx, ::Unit, n)
 end
 
-function to_sql!(ctx, core::WhereCore, q)
-    base, = q
+function to_sql!(ctx, ::Where, n)
+    base, pred = n.args
     print(ctx, " FROM (")
     to_sql!(ctx, base)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[base])
     print(ctx, " WHERE ")
-    to_sql!(ctx, core.pred)
+    to_sql!(ctx, pred)
 end
 
-function to_sql!(ctx, core::JoinCore, q)
-    left, right = q
+function to_sql!(ctx, core::Join, n)
+    left, right, on = n.args
     print(ctx, " FROM (")
     to_sql!(ctx, left)
     print(ctx, ") AS ")
@@ -603,29 +734,19 @@ function to_sql!(ctx, core::JoinCore, q)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[right])
     print(ctx, " ON (")
-    to_sql!(ctx, core.on)
+    to_sql!(ctx, on)
     print(ctx, ")")
 end
 
-function to_sql!(ctx, core::SelectCore, q)
-    base, = q
+function to_sql!(ctx, core::Select, n)
+    base = n.args[1]
+    list = @view n.args[2:end]
     if isempty(ctx.aliases)
-        populate_aliases!(ctx, q)
+        populate_aliases!(ctx, n)
     end
-    print(ctx, "SELECT")
-    first = true
-    for (alias, val) in core.list
-        if first
-            print(ctx, ' ')
-            first = false
-        else
-            print(ctx, ", ")
-        end
-        to_sql!(ctx, val)
-        print(ctx, " AS ")
-        to_sql!(ctx, alias)
-    end
-    if base.core isa SelectCore
+    print(ctx, "SELECT ")
+    to_sql!(ctx, list, ", ", "", "")
+    if base.core isa Select
         print(ctx, " FROM (")
         to_sql!(ctx, base)
         print(ctx, ") AS ")
@@ -635,57 +756,29 @@ function to_sql!(ctx, core::SelectCore, q)
     end
 end
 
-function to_sql!(ctx, core::GroupCore, q)
-    base, = q
+function populate_aliases!(ctx, ns::Vector{SQLNode})
+    for n in ns
+        populate_aliases!(ctx, n)
+    end
+end
+
+function populate_aliases!(ctx, n::SQLNode)
+    base_core = n.core
+    if base_core isa Select
+        ctx.aliases[n] = gensym()
+    end
+    populate_aliases!(ctx, n.args)
+end
+
+function to_sql!(ctx, core::Group, n)
+    base = n.args[1]
+    list = @view n.args[2:end]
     print(ctx, " FROM (")
     to_sql!(ctx, base)
     print(ctx, ") AS ")
     to_sql!(ctx, ctx.aliases[base])
-    print(ctx, " GROUP BY")
-    first = true
-    for (alias, val) in core.list
-        if first
-            print(ctx, ' ')
-            first = false
-        else
-            print(ctx, ", ")
-        end
-        to_sql!(ctx, val)
-    end
-end
-
-function populate_aliases!(ctx, qs::Vector{SQLQuery})
-    for q in qs
-        populate_aliases!(ctx, q)
-    end
-end
-
-function populate_aliases!(ctx, q::SQLQuery)
-    base_core = q.core
-    if base_core isa SelectCore
-        ctx.aliases[q] = gensym()
-    end
-    populate_aliases!(ctx, q.args)
-end
-
-mutable struct ToSQLContext <: IO
-    io::IOBuffer
-    aliases::Dict{Any,Symbol}       # Dict{Select,Symbol}
-
-    ToSQLContext() =
-        new(IOBuffer(), Dict{Any,Symbol}())
-end
-
-Base.write(ctx::ToSQLContext, octet::UInt8) =
-    write(ctx.io, octet)
-
-Base.unsafe_write(ctx::ToSQLContext, input::Ptr{UInt8}, nbytes::UInt) =
-    unsafe_write(ctx.io, input, nbytes)
-
-function to_sql(@nospecialize ex)
-    ctx = ToSQLContext()
-    to_sql!(ctx, ex)
-    String(take!(ctx.io))
+    print(ctx, " GROUP BY ")
+    to_sql!(ctx, list, ", ", "", "")
 end
 
 function to_sql!(ctx, ::Missing)

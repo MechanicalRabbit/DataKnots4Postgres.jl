@@ -746,44 +746,44 @@ function make_joins(join, alias, alias_to_from)
         join = from
     elseif on isa PGUniqueKey
         parent_from = alias_to_from[alias.parent]
-        args = SQLExpr[]
+        args = SQLNode[]
         for col in on.columns
-            push!(args, Op(:(=), pick(parent_from, Symbol(col.name)), pick(from, Symbol(col.name))))
+            push!(args, Fun(:(=), lookup(parent_from, Symbol(col.name)), lookup(from, Symbol(col.name))))
         end
-        pred = Op(:(&&), args...)
-        join = Join(join, from, pred)
+        pred = Fun(:(&&), args...)
+        join = join |> Join(from, pred)
     elseif on isa PGForeignKey
         parent_from = alias_to_from[alias.parent]
-        args = SQLExpr[]
+        args = SQLNode[]
         for (col1, col2) in zip(on.columns, on.target_columns)
-            push!(args, Op(:(=), pick(parent_from, Symbol(col1.name)), pick(from, Symbol(col2.name))))
+            push!(args, Fun(:(=), lookup(parent_from, Symbol(col1.name)), lookup(from, Symbol(col2.name))))
         end
-        pred = Op(:(&&), args...)
-        join = Join(join, from, pred)
+        pred = Fun(:(&&), args...)
+        join = join |> Join(from, pred)
     end
     for child in alias.children
         join = make_joins(join, child, alias_to_from)
     end
     if alias.parent === nothing && on isa Vector{PGColumn}
-        args = SQLExpr[]
+        args = SQLNode[]
         for (k, col) in enumerate(on)
-            push!(args, Op(:(=), pick(from, Symbol(col.name)), Placeholder(k)))
+            push!(args, Fun(:(=), lookup(from, Symbol(col.name)), Placeholder(k)))
         end
-        pred = Op(:(&&), args...)
-        join = Where(join, pred)
+        pred = Fun(:(&&), args...)
+        join = join |> Where(pred)
     end
     join
 end
 
 function make_sql(bundle)
     columns = make_columns(bundle)
-    alias_to_from = Dict{SQLAlias,SQLQuery}()
+    alias_to_from = Dict{SQLAlias,SQLNode}()
     j = make_joins(nothing, bundle.root, alias_to_from)
-    list = Pair{Symbol,SQLExpr}[]
+    list = SQLNode[]
     for (alias, col) in columns
-        push!(list, Symbol(col.name) => pick(alias_to_from[alias], Symbol(col.name)))
+        push!(list, lookup(alias_to_from[alias], Symbol(col.name)))
     end
-    select = Select(j, list...)
+    select = j |> Select(list)
     return normalize(select), columns
 end
 
