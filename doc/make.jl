@@ -21,5 +21,5 @@ makedocs(
     modules = [DataKnots4Postgres])
 
 deploydocs(
-    repo = "github.com/rbt-lang/DataKnots4Postgres.jl.git",
+    repo = "github.com/MechanicalRabbit/DataKnots4Postgres.jl.git",
 )
